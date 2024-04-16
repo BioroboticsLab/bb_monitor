@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bb_monitor"
+version = "0.0.1"
+dependencies = [
+
+    "saliency-localizer @ git+https://github.com/nebw/saliency-localizer.git",
+    "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary.git",
+    "bb_pipeline @ git+https://github.com/BioroboticsLab/bb_pipeline.git",
+]
+
+[tool.setuptools]
+packages = ["bb_monitor"]
+
+[project.scripts]
+bb_monitor = "bb_monitor.bb_monitor:main"
+
