@@ -1,5 +1,15 @@
 # bb_monitor
  Send image and basic tracking statistics to Telegram monitor bot
 
-installation:
-pip install git+https://github.com/BioroboticsLab/bb_monitor.git
+## Installation (includes dependencies):
+```
+git clone https://github.com/BioroboticsLab/bb_monitor.git
+cd bb_monitor
+pip install .
+```
+
+## Running
+create a file 'user_config.py' and set the correct values.  The script will read this file if it exists. Then run:
+```
+python bb_monitor.py
+```

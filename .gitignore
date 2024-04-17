@@ -3,3 +3,4 @@ __pycache__/user_config.cpython-310.pyc
 *.pyc
 user_config.py
 .DS_Store
+/bb_monitor.egg-info

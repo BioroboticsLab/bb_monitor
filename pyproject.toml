@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = find:
+packages = { find = { where = ["."] } }
 
 [project.scripts]
 bb_monitor = "bb_monitor:main"
