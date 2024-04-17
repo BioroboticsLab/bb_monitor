@@ -13,8 +13,8 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["bb_monitor"]
+packages = find:
 
 [project.scripts]
-bb_monitor = "bb_monitor.bb_monitor:main"
+bb_monitor = "bb_monitor:main"
 
