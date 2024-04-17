@@ -13,9 +13,6 @@ import numpy as np
 from time import sleep
 import tempfile
 
-### USEFUL CODE SNIPPETS
-# "{}".format(datetime.datetime.now())
-
 def find_most_recent_files(base_directory, sub_directories, file_type):
     """Finds the most recent files across subdirectories within the latest date directory."""
     # List all date directories in the base directory
@@ -30,7 +27,7 @@ def find_most_recent_files(base_directory, sub_directories, file_type):
     most_recent_files = []
     for subdir in sub_directories:
         path = os.path.join(latest_date_dir, subdir)
-        files = glob.glob(os.path.join(path, "*."+file_type))
+        files = glob.glob(os.path.join(path,'*'+file_type))
         if files:
             latest_file = max(files, key=os.path.getmtime)
             most_recent_files.append(latest_file)
@@ -109,10 +106,10 @@ def send_photo(file, caption=""):
     response = requests.post(send_url, params, files=files)
     return response.json()
 
-def process_image_and_send(image,text_for_image):
+def process_image_and_send(image):
     # Save the image to a temporary directory
     temp_dir = tempfile.mkdtemp()
-    temp_image_path = os.path.join(temp_dir, text_for_image+'.png')
+    temp_image_path = os.path.join(temp_dir, config.monitor_bot_name+datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")+'.png')
     cv2.imwrite(temp_image_path, image)
 
     # Send the image
@@ -146,15 +143,25 @@ def wait_and_get_images():
                         cv2.imwrite(os.path.join(savedir,image_name), image)
 
             if sendmsgnow:
-                # prepare images to make a composite image 
-                composite_image = join_images(images)
+                # Prepare to make a composite image
+                # Stamp each image with its filename before joining
+                stamped_images = []
+                for image, videoname in zip(images, latest_videos):
+                    if image is not None:
+                        # Extract the filename without extension
+                        filename = os.path.splitext(os.path.basename(videoname))[0]
+                        # Add filename as text to the image
+                        stamped_image = add_text_to_image(image, filename)
+                        stamped_images.append(stamped_image)
+                    else:
+                        stamped_images.append(None)
+                composite_image = join_images(stamped_images)
                 if composite_image is not None:
                     composite_image = rotate_image(composite_image,config.rotate)
                     composite_image = resize_image(composite_image,width=config.image_width)
-                    text_for_image = config.monitor_bot_name + ": " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    composite_image = add_text_to_image(composite_image,text_for_image)
+                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(config.image_width-100,15),font_scale=0.5)
                     # send image to message bot
-                    process_image_and_send(composite_image,text_for_image)
+                    process_image_and_send(composite_image)
                     print('Sent image at',datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 else: # send an error message
                     send_message("Error: "+datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

@@ -9,7 +9,6 @@ timer_messagebot_multiplier = 1  # integer.  Multiplies timer_image_saving
  
  # Whether or not to save images
 save_images = False 
-# Whether or not to run processing pipeline to get detections.  If yes, these are saved in image_output_directory, and a plot is added to the messagebot image
 # List of input and output directories.  Can include multiple cameras
 input_basedir = "/Users/jacob/Desktop/v_output_dir"  # this should be set to the same as "output_directory" bb_imgstorage_nfs
 input_subdir_names = ["cam0","cam1"]
@@ -23,5 +22,6 @@ image_width = 1024
 
 ############################################################
 ## NOT IMPLEMENTED YET
+# Whether or not to run processing pipeline to get detections.  If yes, these are saved in image_output_directory, and a plot is added to the messagebot image
 # Note! : save_images needs to be True in order to use this
 process_imagestats = False  
