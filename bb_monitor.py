@@ -78,7 +78,7 @@ def add_text_to_image(image, text, position=(0.02,0.02), font_scale_relative=0.0
     # Calculate font scale based on image width
     (height, width) = image.shape[:2]
     font_scale = font_scale_relative * width
-    position_scaled = [position[0]*width, position[1]*height]
+    position_scaled = [int(position[0]*width), int(position[1]*height)]
 
     cv2.putText(image, text, position_scaled, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
     return image
