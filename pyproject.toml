@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "bb_monitor"
 version = "0.0.1"
 dependencies = [
-
-    "saliency-localizer @ git+https://github.com/nebw/saliency-localizer.git",
-    "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary.git",
-    "bb_pipeline @ git+https://github.com/BioroboticsLab/bb_pipeline.git",
+    "numpy>=1.24", "opencv-python>=4.7", "requests>=2.31"
+    # "saliency-localizer @ git+https://github.com/nebw/saliency-localizer.git",
+    # "bb_binary @ git+https://github.com/BioroboticsLab/bb_binary.git",
+    # "bb_pipeline @ git+https://github.com/BioroboticsLab/bb_pipeline.git",
 ]
 
 [tool.setuptools]

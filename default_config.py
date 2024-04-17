@@ -12,6 +12,8 @@ save_images = False
 # List of input and output directories.  Can include multiple cameras
 input_basedir = "/Users/jacob/Desktop/v_output_dir"  # this should be set to the same as "output_directory" bb_imgstorage_nfs
 input_subdir_names = ["cam0","cam1"]
+# images will be saved in subdirectories under output_basedir, with the subdir names
+# can be "" if not saving images
 output_basedir = "/Users/jacob/Desktop/frames" # images will be saved in subdirectories under this, with the subdir names
 file_type = "avi"
 
