@@ -73,8 +73,12 @@ def resize_image(image, width):
     resized_image = cv2.resize(image, (width, new_height), interpolation=cv2.INTER_AREA)
     return resized_image
 
-def add_text_to_image(image, text, position=(10, 15), font_scale=0.4, font_thickness=1):
+def add_text_to_image(image, text, position=(10, 15), font_scale_relative=0.01, font_thickness=1):
     """Adds text to an image."""
+    # Calculate font scale based on image width
+    (_, width) = image.shape[:2]
+    font_scale = font_scale_relative * width
+
     cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
     return image
 
@@ -159,7 +163,7 @@ def wait_and_get_images():
                 if composite_image is not None:
                     composite_image = rotate_image(composite_image,config.rotate)
                     composite_image = resize_image(composite_image,width=config.image_width)
-                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(config.image_width-100,15),font_scale=0.5)
+                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(config.image_width-200,15),font_scale_relative=0.015)
                     # send image to message bot
                     process_image_and_send(composite_image)
                     print('Sent image at',datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
