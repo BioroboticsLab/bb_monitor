@@ -16,12 +16,14 @@ import tempfile
 def find_most_recent_files(base_directory, sub_directories, file_type):
     """Finds the most recent files across subdirectories within the latest date directory."""
     # List all date directories in the base directory
-    date_dirs = [os.path.join(base_directory, d) for d in os.listdir(base_directory) if os.path.isdir(os.path.join(base_directory, d))]
+    current_year = str(datetime.datetime.now().year) 
+    date_dirs = [os.path.join(base_directory, d) for d in os.listdir(base_directory)
+             if os.path.isdir(os.path.join(base_directory, d)) and d.startswith(current_year)]    
     if not date_dirs:
         return None
 
     # Find the latest date directory
-    latest_date_dir = max(date_dirs, key=os.path.getmtime)
+    latest_date_dir = max(date_dirs)
 
     # Check each camera subdirectory within the latest date directory
     most_recent_files = []
