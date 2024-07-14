@@ -1,5 +1,5 @@
 # bb_monitor
- Send image and basic tracking statistics to Telegram monitor bot
+ Send image to Telegram monitor bot
 
 ## Installation (includes dependencies):
 ```

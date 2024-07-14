@@ -4,19 +4,19 @@ except:
     print("Could not import user-defined config (user_config.py). Falling back to default config.")
     import default_config as config
 
-import requests
-import datetime
+from datetime import datetime
 import cv2
 import glob
 import os
 import numpy as np
 from time import sleep
-import tempfile
+import src.mon as mon
+
 
 def find_most_recent_files(base_directory, sub_directories, file_type):
     """Finds the most recent files across subdirectories within the latest date directory."""
     # List all date directories in the base directory
-    current_year = str(datetime.datetime.now().year) 
+    current_year = str(datetime.now().year) 
     date_dirs = [os.path.join(base_directory, d) for d in os.listdir(base_directory)
              if os.path.isdir(os.path.join(base_directory, d)) and d.startswith(current_year)]    
     if not date_dirs:
@@ -85,48 +85,6 @@ def add_text_to_image(image, text, position=(0.02,0.07), font_scale_relative=0.0
     cv2.putText(image, text, position_scaled, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
     return image
 
-def send_message(message):
-    send_url = f'https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage'
-    data = {'chat_id': config.telegram_chat_id, 'text': config.monitor_bot_name+':  '+message}    
-    response = requests.post(send_url, data=data).json()
-    if not(response['ok']):
-        print("Message not sent")
-    return response['ok']
-
-def send_photo(file, caption=""):
-    """
-    Sends a file:
-    
-    :param bot_token: Telegram Bot API token
-    :param chat_id: Chat ID
-    :param file: file name
-    :param caption:  optional, add a caption
-    :return: resp.
-    """    
-    params = {'chat_id': config.telegram_chat_id, 'caption': caption}
-    try:
-        file_opened = open(file,'rb')
-    except:
-        return None
-    files = {'photo': file_opened}
-    send_url = f'https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto'
-    response = requests.post(send_url, params, files=files)
-    return response.json()
-
-def process_image_and_send(image):
-    # Save the image to a temporary directory
-    temp_dir = tempfile.mkdtemp()
-    temp_image_path = os.path.join(temp_dir, config.monitor_bot_name+datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")+'.png')
-    cv2.imwrite(temp_image_path, image)
-
-    # Send the image
-    response = send_photo(temp_image_path)
-    # could check for success here
-
-    # Delete the image file and directory now that its been sent
-    os.remove(temp_image_path)
-    os.rmdir(temp_dir)
-    return response
 
 ######
 def wait_and_get_images():
@@ -134,7 +92,7 @@ def wait_and_get_images():
     messagebot_counter = 1 
 
     while True:
-        lasttime = datetime.datetime.now()
+        lasttime = datetime.now()
         sendmsgnow = (messagebot_counter==config.timer_messagebot_multiplier)
 
         if (config.save_images==True) or (sendmsgnow==True):
@@ -168,24 +126,24 @@ def wait_and_get_images():
                     composite_image = resize_image(composite_image,width=config.image_width)
                     composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.5,0.1),font_scale_relative=0.002)
                     # send image to message bot
-                    process_image_and_send(composite_image)
-                    print('Sent image at',datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    mon.process_image_and_send(config,composite_image)
+                    print('Sent image at',datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 else: # send an error message
-                    send_message("Error: "+datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    print('Error at',datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    mon.send_message(config,"Error: "+datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    print('Error at',datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 messagebot_counter = 1
             else:
                 messagebot_counter = messagebot_counter + 1
 
         # correct time to wait by any script processing time
-        current_time = datetime.datetime.now()
+        current_time = datetime.now()
         time_to_wait = config.timer_image_saving*60 - (current_time-lasttime).total_seconds()
         if time_to_wait>0:  # it could be <0 if processing takes a really long time
             sleep(time_to_wait)
 
 if __name__ == "__main__":
     print("Starting...")
-    # if send_message(config.monitor_bot_name+":  Started bb_monitor"):
+    # if mon.send_message(config,config.monitor_bot_name+":  Started bb_monitor"):
     #     print("Telegram message bot connected")
     # else:
     #     print("ERROR: check message bot settings")

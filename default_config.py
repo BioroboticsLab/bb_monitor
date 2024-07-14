@@ -21,9 +21,4 @@ file_type = "avi"
 rotate = 90 # angle for rotating joined camera images.  Use 90 (or -90?) for main cameras, 0 for feeder/exit
 image_width = 1024
 
-
-############################################################
-## NOT IMPLEMENTED YET
-# Whether or not to run processing pipeline to get detections.  If yes, these are saved in image_output_directory, and a plot is added to the messagebot image
-# Note! : save_images needs to be True in order to use this
-process_imagestats = False  
+ 
