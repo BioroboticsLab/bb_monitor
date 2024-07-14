@@ -101,7 +101,7 @@ def get_perbee_df(filename,filename_to_save):
     df_perbee['average_speed'] = df_alltracks.groupby('bee_id').apply(calculate_speed,include_groups=False).values
 
     # round to the nearest 15 minutes to save timestamp of segment
-    mean_ts = df_alltracks.groupby('bee_id')['video_start_timestamp'].apply(mean_cam_timestamp)
+    mean_ts = df_alltracks.groupby('bee_id')['video_start_timestamp'].apply(mon.mean_cam_timestamp)
     df_perbee['timestamp_of_segment'] = mon.round_to_nearest_15min(mean_ts).values
     
     pickle.dump([df_meancounts, df_perbee], open(filename_to_save,'wb'))
