@@ -19,12 +19,13 @@ def process_image_and_send(config,image):
     temp_image_path = os.path.join(temp_dir, config.monitor_bot_name+datetime.now().strftime("%Y-%m-%d %H:%M:%S")+'.png')
     
     # Check the type of the image and save accordingly
-    if isinstance(image, plt.Figure):
-        image.savefig(temp_image_path)
-    elif isinstance(image, (cv2.UMat, cv2.Mat)):
-        cv2.imwrite(temp_image_path, image)
-    else:
-        raise ValueError("Unsupported image type. Use a Matplotlib figure or OpenCV image.")    
+    try:
+        if isinstance(image, plt.Figure):
+            image.savefig(temp_image_path)
+        else:
+            cv2.imwrite(temp_image_path, image)
+    except Exception as e:
+        raise ValueError("Unsupported image type. Use a Matplotlib figure or OpenCV image.") from e
 
     # Send the image
     response = send_photo(config,temp_image_path)
