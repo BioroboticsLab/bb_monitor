@@ -75,7 +75,7 @@ def resize_image(image, width):
     resized_image = cv2.resize(image, (width, new_height), interpolation=cv2.INTER_AREA)
     return resized_image
 
-def add_text_to_image(image, text, position=(0.02,0.09), font_scale_relative=0.0014, font_thickness=6):
+def add_text_to_image(image, text, position=(0.02,0.1), font_scale_relative=0.0013, font_thickness=6):
     """Adds text to an image."""
     # Calculate font scale based on image width
     (height, width) = image.shape[:2]
