@@ -141,11 +141,10 @@ def get_average_counts(file):
         return average_counts
     
 
-def get_detections_data(savedir, numdays, window_size_hours=24, mincounts=10):
+def get_detections_data(savedir, numdays, window_size_hours=24, mincounts=10, re_process=False):
     allfilenames  = mon.get_latest_processed_files(savedir,numdays*24)
     
     # check if all have been processed
-    re_process = False
     for filename in allfilenames:
         filename_to_save = savedir+'processed/'+'df_counts_and_perbee_'+filename.split('/')[-1]
         if (not(os.path.exists(filename_to_save))) | re_process:
