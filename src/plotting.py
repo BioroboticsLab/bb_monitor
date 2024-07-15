@@ -25,10 +25,6 @@ def common_plot_formatting(ax, df_results, window_size_hours):
 ## break segments where there is not data
 def plot_detections(a, df_results, ycol, segtime_minutes=60):
     last_points = df_results.groupby('hive_id').last().reset_index()
-    lpdict = {'hue': 'hive_id', 'style': 'hive_id', 'dashes': False}
-    spdict = {'hue': 'hive_id', 'marker': 'o', 's': 50, 'legend': False}
-
-    tp = {'x': 'timestamp_of_segment', 'y': ycol}
     
     df_temp = df_results.copy()
     nanfillsback = []
@@ -58,6 +54,7 @@ def plot_detections(a, df_results, ycol, segtime_minutes=60):
         a.plot(hive_data['timestamp_of_segment'], hive_data[ycol], label=f'{hive_id}')
         hive_data = last_points[last_points['hive_id'] == hive_id]
         a.scatter(hive_data['timestamp_of_segment'], hive_data[ycol], s=50, marker='o')
+    a.legend(title='Hive',fontsize=12,loc=2,title_fontsize=12)  
 
 def plot_feedercam_counts(a, dfcounts,feedercamhives, minutes_to_avg=15):
     # Group by 'camID' and resample by 'video_start_timestamp' with the specified interval
