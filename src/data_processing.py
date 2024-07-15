@@ -12,6 +12,16 @@ detection_types = ['BeeInCell', 'TaggedBee', 'UnmarkedBee', 'UpsideDownBee']
 ###############################################
 ## fns to filter and calculate things from the data
 ###############################################
+def round_down_to_nearest_hour(dt_series):
+    # Ensure datetime series is timezone-naive for accurate calculations
+    dt_series = pd.to_datetime(dt_series)
+    if dt_series.dt.tz is not None:
+        dt_series = dt_series.dt.tz_convert(None)
+
+    # Round down to the nearest hour by flooring the datetime to the hour
+    dt_series = dt_series.dt.floor('h')
+    return dt_series
+
 def calculate_speed(group):
     max_speed = 200 # pixels/frame, max
     group = group.sort_values(by='timestamp_posix')
@@ -102,7 +112,7 @@ def get_perbee_df(filename,filename_to_save):
 
     # round to the nearest 15 minutes to save timestamp of segment
     mean_ts = df_alltracks.groupby('bee_id')['video_start_timestamp'].apply(mon.mean_cam_timestamp)
-    df_perbee['timestamp_of_segment'] = mon.round_to_nearest_15min(mean_ts).values
+    df_perbee['timestamp_of_segment'] = round_down_to_nearest_hour(mean_ts).values
     
     pickle.dump([df_meancounts, df_perbee], open(filename_to_save,'wb'))
 
@@ -158,7 +168,7 @@ def get_detections_data(savedir, numdays, window_size_hours=24, mincounts=10):
     # round camera times to nearest 15 min and sum over counts during this time period
     mc_to_merge = df_meancounts.copy()
     # round to nearest 15 min
-    mc_to_merge['timestamp_of_segment'] = mon.round_to_nearest_15min(mc_to_merge['timestamp']).values
+    mc_to_merge['timestamp_of_segment'] = round_down_to_nearest_hour(mc_to_merge['timestamp']).values
     mc_to_merge['timestamp_of_segment'] = pd.to_datetime(mc_to_merge['timestamp_of_segment'])
     # take mean across timestamps.  do mean instead of sum, because this correct for multiple timestamps in a segment
     cameras_per_hive = 2

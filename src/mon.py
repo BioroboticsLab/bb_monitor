@@ -133,26 +133,6 @@ def get_latest_processed_files(basename, numhours):
 
     return sorted(filtered_files)
 
-def round_to_nearest_15min(dt_series):
-    # Ensure datetime series is timezone-naive for accurate calculations
-    dt_series = pd.to_datetime(dt_series)
-    if dt_series.dt.tz is not None:
-        dt_series = dt_series.dt.tz_convert(None)
-
-    # Calculate the number of minutes past the hour
-    minutes = dt_series.dt.minute
-
-    # Calculate the rounded minutes
-    rounded_minutes = ((minutes // 15) * 15).where(minutes % 15 < 7.5, ((minutes // 15 + 1) * 15) % 60)
-    
-    # Adjust the hour if rounded minutes overflow to the next hour
-    overflow_hours = (rounded_minutes == 0) & (minutes % 15 >= 7.5)
-    dt_series = dt_series + pd.to_timedelta(overflow_hours.astype(int), unit='h')
-    
-    # Update the minute and set seconds and microseconds to zero
-    dt_series = dt_series.dt.floor('h') + pd.to_timedelta(rounded_minutes, unit='m')
-    return dt_series
-
 def mean_cam_timestamp(ts):
     # timestamps for two cameras.  calculate the difference, and if its too large, return nan
     if len(ts)>1:

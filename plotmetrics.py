@@ -48,8 +48,8 @@ def load_data_and_send_plots():
     a.set_ylabel('Speed (pixels/sec)',fontsize=14)
     ### common formatting
     pt.common_plot_formatting(ax,df_results,window_size_hours)  
-    plt.suptitle(str(datetime.now())[5:-7],y=1.01)
-    plt.tight_layout() 
+    plt.suptitle(str(datetime.now())[5:-7],y=0.98)
+    plt.tight_layout()
     mon.process_image_and_send(config,f)
     plt.close()
 
@@ -68,7 +68,7 @@ def load_data_and_send_plots():
     pt.plot_temperature_sensors(a,combined_data,label_dict)
     ### common formatting
     pt.common_plot_formatting(ax,df_results,window_size_hours)
-    plt.suptitle(str(datetime.now())[5:-7],y=1.01)
+    plt.suptitle(str(datetime.now())[5:-7],y=0.98)
     plt.tight_layout()
     mon.process_image_and_send(config,f)
     plt.close()
