@@ -49,7 +49,7 @@ def load_data_and_send_plots():
     ### common formatting
     pt.common_plot_formatting(ax,df_results,window_size_hours)  
     plt.suptitle(str(datetime.now())[5:-7],y=1.01)
-    plt.tight_layout()
+    plt.tight_layout() 
     mon.process_image_and_send(config,f)
     plt.close()
 
