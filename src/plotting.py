@@ -58,9 +58,10 @@ def plot_detections(a, df_results, ycol, segtime_minutes=60):
 
 def plot_feedercam_counts(a, dfcounts,feedercamhives, minutes_to_avg=15):
     # Group by 'camID' and resample by 'video_start_timestamp' with the specified interval
-    resampled_df = dfcounts.groupby('camID').resample(f'{minutes_to_avg}min', on='video_start_timestamp').mean().reset_index()
-    for camID, group in resampled_df.groupby('camID'):
-        a.plot(group['video_start_timestamp'], group['totalcounts'], marker='.', linestyle='-', label=feedercamhives[camID])    
+    if len(dfcounts)>0:
+        resampled_df = dfcounts.groupby('camID').resample(f'{minutes_to_avg}min', on='video_start_timestamp').mean().reset_index()
+        for camID, group in resampled_df.groupby('camID'):
+            a.plot(group['video_start_timestamp'], group['totalcounts'], marker='.', linestyle='-', label=feedercamhives[camID])    
     a.set_ylabel('Avg counts at feeder', fontsize=14)
     a.legend(title='Hive',fontsize=12,loc=2,title_fontsize=12)         
 

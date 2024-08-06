@@ -193,9 +193,12 @@ def get_detections_data(savedir, numdays, window_size_hours=24, mincounts=10, re
 
 def get_rpi_feeder_cam_data(savedir, numdays):
     files = mon.get_latest_processed_files(savedir, numdays*24)
-    dfcounts = pd.concat([get_average_counts(f) for f in files])
-    dfcounts['video_start_timestamp'] = pd.to_datetime(dfcounts['video_start_timestamp'])
-    return dfcounts
+    if len(files)>0:
+        dfcounts = pd.concat([get_average_counts(f) for f in files])
+        dfcounts['video_start_timestamp'] = pd.to_datetime(dfcounts['video_start_timestamp'])
+        return dfcounts
+    else:
+        return pd.DataFrame()
 
 def get_weather_data(station_id, numdays):
     end = datetime.now()
