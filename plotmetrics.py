@@ -30,6 +30,28 @@ def load_data_and_send_plots():
     # Temperature data
     combined_data, hex_codes_dict, label_dict = dp.get_temperature_data(weather_data_folder, numdays)
 
+    # get min and max dates that have data, for any sources
+    # List of DataFrame and column name pairs
+    df_time_columns = [
+        (hourdata.reset_index(), 'time'),
+        (combined_data, 'Time'),
+        (dfcounts, 'video_start_timestamp'),
+        (df_results, 'timestamp_of_segment')
+    ]
+
+    # Initialize mintime and maxtime with None
+    mintime = None
+    maxtime = None
+
+    for df, column in df_time_columns:
+        if not df.empty:
+            current_min = df[column].min()
+            current_max = df[column].max()
+            
+            if mintime is None or current_min < mintime:
+                mintime = current_min
+            if maxtime is None or current_max > maxtime:
+                maxtime = current_max
 
     ### PLOT 1:  detections and speed
     f, ax = plt.subplots(3, 1, figsize=(5, 10), sharex=True)
@@ -47,7 +69,7 @@ def load_data_and_send_plots():
     # pt.plot_detections(a,df_results,'avg_speed_weighted') #  this and per_bee show about the same thing
     a.set_ylabel('Speed (pixels/sec)',fontsize=14)
     ### common formatting
-    pt.common_plot_formatting(ax,df_results,window_size_hours)  
+    pt.common_plot_formatting(ax,mintime,maxtime,window_size_hours)  
     plt.suptitle(str(datetime.now())[5:-7],y=0.98)
     plt.tight_layout()
     mon.process_image_and_send(config,f)
@@ -67,7 +89,7 @@ def load_data_and_send_plots():
     a=ax[2]
     pt.plot_temperature_sensors(a,combined_data,label_dict)
     ### common formatting
-    pt.common_plot_formatting(ax,df_results,window_size_hours)
+    pt.common_plot_formatting(ax,mintime,maxtime,window_size_hours)
     plt.suptitle(str(datetime.now())[5:-7],y=0.98)
     plt.tight_layout()
     mon.process_image_and_send(config,f)

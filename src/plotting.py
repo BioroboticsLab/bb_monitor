@@ -4,17 +4,17 @@ import numpy as np
 import pandas as pd
 import matplotlib.dates as mdates
 
-def common_plot_formatting(ax, df_results, window_size_hours):
+def common_plot_formatting(ax, mintime, maxtime, window_size_hours):
     for a in ax:
         a.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
         a.tick_params(axis='both', which='major', labelsize=12, rotation=90)
-        for date in pd.date_range(df_results['timestamp_of_segment'].min().normalize() + pd.Timedelta(days=1), df_results['timestamp_of_segment'].max().normalize()):
+        for date in pd.date_range(mintime.normalize() + pd.Timedelta(days=1), maxtime.normalize()):
             a.axvline(date, color='gray', linestyle='--', linewidth=0.7)
             if a == ax[0]:
                 a.annotate(date.strftime('%m-%d'), xy=(date, 1), xycoords=('data', 'axes fraction'),
                            xytext=(5, 5), textcoords='offset points', rotation=90, va='bottom', ha='center', fontsize=12, color='k')
-    a.set_xlim(left=df_results['timestamp_of_segment'].min() + pd.Timedelta(days=window_size_hours/24))
-    a.set_xlim(right=df_results['timestamp_of_segment'].max() + pd.Timedelta(hours=1))
+    a.set_xlim(left=mintime + pd.Timedelta(days=window_size_hours/24))
+    a.set_xlim(right=maxtime + pd.Timedelta(hours=1))
 
 ## simple version
 # def plotboth(a,ycol):
