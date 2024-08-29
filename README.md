@@ -1,5 +1,5 @@
 # bb_monitor
- Send image to Telegram monitor bot
+Code to send image and calculated quantities from current recordings to a Telegram monitor bot.
 
 ## Installation (includes dependencies):
 ```
