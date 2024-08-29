@@ -5,3 +5,4 @@ user_config.py
 .DS_Store
 /bb_monitor.egg-info
 /.ipynb_checkpoints
+/track_videos
