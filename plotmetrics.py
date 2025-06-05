@@ -14,7 +14,7 @@ import src.mon as mon
 # Directories and settings
 savedir = '/mnt/local_storage/beesbook2024/single_tracks/'
 rpi_savedir = '/pi/single_tracks/'
-weather_data_folder = '/home/beesbook/bb2024/bb_temploggers/data/'
+temperature_data_folder = '/home/beesbook/bb2024/bb_temploggers/data/'
 numdays = 6
 window_size_hours = 24  # for counting unique id's detected
 station_id = '10381'  # weather station ID, for use in meteostat
@@ -28,7 +28,7 @@ def load_data_and_send_plots():
     # Weather data
     hourdata = dp.get_weather_data(station_id, numdays)
     # Temperature data
-    combined_data, hex_codes_dict, label_dict = dp.get_temperature_data(weather_data_folder, numdays)
+    combined_data, hex_codes_dict, label_dict = dp.get_temperature_data(temperature_data_folder, numdays)
 
     # get min and max dates that have data, for any sources
     # List of DataFrame and column name pairs
