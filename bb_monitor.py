@@ -1,8 +1,29 @@
-try:
-    import user_config as config
-except:
-    print("Could not import user-defined config (user_config.py). Falling back to default config.")
-    import default_config as config
+import sys                                    
+import importlib.util                       
+
+# First try to load a config file passed on the command line
+if len(sys.argv) > 1:
+    config_path = sys.argv[1]
+    try:
+        spec = importlib.util.spec_from_file_location("cli_config", config_path)
+        config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config)
+    except Exception as e:
+        print(f"Failed to import CLI config at '{config_path}': {e}")
+        # Fall back to user_config / default_config below
+        _cli_failed = True
+    else:
+        _cli_failed = False
+else:
+    _cli_failed = True
+
+# If no valid CLI config, try user_config, then default_config
+if _cli_failed:
+    try:
+        import user_config as config
+    except ImportError:
+        print("Could not import user-defined config (user_config.py). Falling back to default config.")
+        import default_config as config
 
 from datetime import datetime
 import cv2
