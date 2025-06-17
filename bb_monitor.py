@@ -157,7 +157,7 @@ def wait_and_get_images():
                                 camname = fname.split('_')[0]
                                 dt = datetime.strptime(timestamp_str, '%Y-%m-%d-%H-%M-%S')
                                 # dt is naive GMT → mark & convert
-                                dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
+                                # dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
                                 hour   = f"{dt.hour:02d}"
                                 minute = f"{dt.minute:02d}"
                                 day    = f"{dt.day:02d}"
