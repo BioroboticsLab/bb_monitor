@@ -32,6 +32,9 @@ import os
 import numpy as np
 from time import sleep
 import src.mon as mon
+from zoneinfo import ZoneInfo
+from bb_binary.parsing import parse_video_fname
+
 
 
 def find_most_recent_files(base_directory, sub_directories, file_type):
@@ -77,18 +80,13 @@ def join_images(images):
     return np.vstack(images)
 
 def rotate_image(image, angle):
-    """Rotates an image by a given angle in degrees, keeping the entire image in view."""
-    (h, w) = image.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    # If rotating by ±90° or 270°, the output shape must swap w<->h
-    if abs(angle) % 180 == 90:
-        new_size = (h, w)
-    else:
-        new_size = (w, h)
-
-    return cv2.warpAffine(image, M, new_size)
+    if angle % 360 ==  90:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    if angle % 360 == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if abs(angle) % 360 == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    return image  # 0° or unrecognized multiple
 
 def resize_image(image, width):
     """Resizes an image to a given width while maintaining aspect ratio."""
@@ -101,7 +99,7 @@ def resize_image(image, width):
     resized_image = cv2.resize(image, (width, new_height), interpolation=cv2.INTER_AREA)
     return resized_image
 
-def add_text_to_image(image, text, position=(0.02,0.1), font_scale_relative=0.0013, font_thickness=6):
+def add_text_to_image(image, text, position=(0.02,0.1), font_scale_relative=0.0015, font_thickness=6):
     """Adds text to an image."""
     # Calculate font scale based on image width
     (height, width) = image.shape[:2]
@@ -139,12 +137,20 @@ def wait_and_get_images():
                 stamped_images = []
                 for image, videoname in zip(images, latest_videos):
                     if image is not None:
-                        # Extract the filename without extension
-                        filename = os.path.splitext(os.path.basename(videoname))[0]
+                        filename = os.path.basename(videoname)
+                        cam_id, start, end = parse_video_fname(videoname, format='basler')
+                        # convert time to CEST (Europe/Berlin uses CET/CEST automatically)
+                        start = start.astimezone(ZoneInfo("Europe/Berlin"))                        
+                        year   = start.year
+                        month  = f"{start.month:02d}"
+                        day    = f"{start.day:02d}"
+                        hour   = f"{start.hour:02d}"
+                        minute = f"{start.minute:02d}"
+                        camtext = f"cam{cam_id}  {hour}:{minute}  {day}.{month}"
                         # rotate image
                         image = rotate_image(image,config.rotate)
                         # Add filename as text to the image
-                        stamped_image = add_text_to_image(image, filename)
+                        stamped_image = add_text_to_image(image, camtext)
                         stamped_images.append(stamped_image)
                     else:
                         stamped_images.append(None)
@@ -152,7 +158,7 @@ def wait_and_get_images():
                 if composite_image is not None:
                     # composite_image = rotate_image(composite_image,config.rotate)
                     composite_image = resize_image(composite_image,width=config.image_width)
-                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.5,0.12),font_scale_relative=0.002)
+                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.4,0.12),font_scale_relative=0.002)
                     # send image to message bot
                     mon.process_image_and_send(config,composite_image)
                     print('Sent image at',datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
