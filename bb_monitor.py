@@ -136,6 +136,8 @@ def wait_and_get_images():
                     if image is not None:
                         # Extract the filename without extension
                         filename = os.path.splitext(os.path.basename(videoname))[0]
+                        # rotate image
+                        image = rotate_image(image,config.rotate)
                         # Add filename as text to the image
                         stamped_image = add_text_to_image(image, filename)
                         stamped_images.append(stamped_image)
@@ -143,7 +145,7 @@ def wait_and_get_images():
                         stamped_images.append(None)
                 composite_image = join_images(stamped_images)
                 if composite_image is not None:
-                    composite_image = rotate_image(composite_image,config.rotate)
+                    # composite_image = rotate_image(composite_image,config.rotate)
                     composite_image = resize_image(composite_image,width=config.image_width)
                     composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.5,0.12),font_scale_relative=0.002)
                     # send image to message bot
