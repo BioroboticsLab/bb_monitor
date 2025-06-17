@@ -138,15 +138,35 @@ def wait_and_get_images():
                 for image, videoname in zip(images, latest_videos):
                     if image is not None:
                         filename = os.path.basename(videoname)
-                        cam_id, start, end = parse_video_fname(videoname, format='basler')
-                        # convert time to CEST (Europe/Berlin uses CET/CEST automatically)
-                        start = start.astimezone(ZoneInfo("Europe/Berlin"))                        
-                        year   = start.year
-                        month  = f"{start.month:02d}"
-                        day    = f"{start.day:02d}"
-                        hour   = f"{start.hour:02d}"
-                        minute = f"{start.minute:02d}"
-                        camtext = f"cam{cam_id}  {hour}:{minute}  {day}.{month}"
+                        # get camtext by pasing the filename
+                        # 1) try the Basler parser
+                        try:
+                            cam_id, start, end = parse_video_fname(filename, format='basler')
+                            # tag it as UTC then convert to CEST
+                            start = start.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
+                            hour   = f"{start.hour:02d}"
+                            minute = f"{start.minute:02d}"
+                            day    = f"{start.day:02d}"
+                            month  = f"{start.month:02d}"
+                            camtext = f"cam{cam_id}  {hour}:{minute}  {day}.{month}"
+                        except Exception:
+                            # 2) try the Pi‐h264 timestamp
+                            try:
+                                fname = os.path.basename(filename)
+                                timestamp_str = fname.split('_')[-1].replace('.h264', '')
+                                camname = fname.split('_')[0]
+                                dt = datetime.strptime(timestamp_str, '%Y-%m-%d-%H-%M-%S')
+                                # dt is naive GMT → mark & convert
+                                dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
+                                hour   = f"{dt.hour:02d}"
+                                minute = f"{dt.minute:02d}"
+                                day    = f"{dt.day:02d}"
+                                month  = f"{dt.month:02d}"
+                                camtext = f"{camname} {hour}:{minute}  {day}.{month}"
+                            except Exception:
+                                # 3) fallback to bare filename
+                                camtext = os.path.splitext(os.path.basename(videoname))[0]
+
                         # rotate image
                         image = rotate_image(image,config.rotate)
                         # Add filename as text to the image
