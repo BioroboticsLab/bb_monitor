@@ -77,13 +77,18 @@ def join_images(images):
     return np.vstack(images)
 
 def rotate_image(image, angle):
-    """Rotates an image by a given angle in degrees."""
+    """Rotates an image by a given angle in degrees, keeping the entire image in view."""
     (h, w) = image.shape[:2]
     center = (w // 2, h // 2)
-    # Rotate the image by the specified angle
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(image, M, (w, h))
-    return rotated
+
+    # If rotating by ±90° or 270°, the output shape must swap w<->h
+    if abs(angle) % 180 == 90:
+        new_size = (h, w)
+    else:
+        new_size = (w, h)
+
+    return cv2.warpAffine(image, M, new_size)
 
 def resize_image(image, width):
     """Resizes an image to a given width while maintaining aspect ratio."""
