@@ -1,30 +1,3 @@
-import sys                                    
-import importlib.util                       
-
-# First try to load a config file passed on the command line
-if len(sys.argv) > 1:
-    config_path = sys.argv[1]
-    try:
-        spec = importlib.util.spec_from_file_location("cli_config", config_path)
-        config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(config)
-    except Exception as e:
-        print(f"Failed to import CLI config at '{config_path}': {e}")
-        # Fall back to user_config / default_config below
-        _cli_failed = True
-    else:
-        _cli_failed = False
-else:
-    _cli_failed = True
-
-# If no valid CLI config, try user_config, then default_config
-if _cli_failed:
-    try:
-        import user_config as config
-    except ImportError:
-        print("Could not import user-defined config (user_config.py). Falling back to default config.")
-        import default_config as config
-
 from datetime import datetime
 import cv2
 import glob
@@ -34,6 +7,8 @@ from time import sleep
 import src.mon as mon
 from zoneinfo import ZoneInfo
 from bb_binary.parsing import parse_video_fname
+
+config = mon.get_config()
 
 
 
@@ -195,11 +170,10 @@ def wait_and_get_images():
         if time_to_wait>0:  # it could be <0 if processing takes a really long time
             sleep(time_to_wait)
 
-if __name__ == "__main__":
+def main():
     print("Starting...")
-    # if mon.send_message(config,config.monitor_bot_name+":  Started bb_monitor"):
-    #     print("Telegram message bot connected")
-    # else:
-    #     print("ERROR: check message bot settings")
-    
     wait_and_get_images()
+
+
+if __name__ == "__main__":
+    main()

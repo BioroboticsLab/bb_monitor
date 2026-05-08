@@ -40,3 +40,20 @@ or (with user_config.py in the root):
 ```bash
 python bb_monitor.py
 ```
+
+## System check
+
+`bb_monitor_systemcheck.py` is a separate script that runs on a regular interval (hourly by default) and posts a single status message to a Telegram channel that is independent of the monitor image bot. It performs two kinds of checks:
+
+- **Reachability** — ICMP-pings each host listed in `systemcheck_ping_hosts` (typically the Raspberry Pi camera hosts).
+- **Remote process check** — for each entry in `systemcheck_process_hosts`, SSHes to the host, runs the configured command, and counts occurrences of a substring in the output. If the count is below `min_count`, the host is flagged. This is generic enough to cover both `nvidia-smi`-based GPU process checks and plain `pgrep` checks.
+
+SSH keys must be configured for passwordless login from the machine running the script to every host in `systemcheck_process_hosts`.
+
+Configuration lives in a separate file from the monitor config so the two can use different Telegram bots/chats. Copy `default_config_systemcheck.py` to `user_config_systemcheck.py` (gitignored) and edit:
+
+```bash
+python bb_monitor_systemcheck.py /path/to/my_systemcheck_config.py
+```
+
+If no config is passed on the command line, the script loads `user_config_systemcheck.py`, falling back to `default_config_systemcheck.py`.

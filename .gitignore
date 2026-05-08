@@ -2,7 +2,7 @@
 __pycache__/user_config.cpython-310.pyc
 *.pyc
 user_config.py
+user_config_systemcheck.py
 .DS_Store
 /bb_monitor.egg-info
 /.ipynb_checkpoints
-/track_videos
