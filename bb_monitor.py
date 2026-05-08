@@ -86,7 +86,7 @@ def add_text_to_image(image, text, position=(0.02,0.1), font_scale_relative=0.00
 
 
 ######
-def wait_and_get_images():
+def wait_and_get_images(config):
     # initialize
     messagebot_counter = 1 
 
@@ -156,10 +156,10 @@ def wait_and_get_images():
                     composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.4,0.12),font_scale_relative=0.002)
                     # send image to message bot
                     mon.process_image_and_send(config,composite_image)
-                    print('Sent image at',datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    print(f"[{config.monitor_bot_name}] Sent image at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 else: # send an error message
                     mon.send_message(config,"Error: "+datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    print('Error at',datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    print(f"[{config.monitor_bot_name}] Error at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 messagebot_counter = 1
             else:
                 messagebot_counter = messagebot_counter + 1
@@ -172,7 +172,7 @@ def wait_and_get_images():
 
 def main():
     print("Starting...")
-    wait_and_get_images()
+    wait_and_get_images(config)
 
 
 if __name__ == "__main__":

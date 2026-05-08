@@ -41,6 +41,20 @@ or (with user_config.py in the root):
 python bb_monitor.py
 ```
 
+## Running multiple configs
+
+If you have several monitor configs (e.g. one per hive plus feeders/exits), run them all in one process with `bb_monitor_multi.py`:
+
+```bash
+python bb_monitor_multi.py hiveA_monitor_config.py hiveB_monitor_config.py \
+                           hiveC_monitor_config.py hiveD_monitor_config.py \
+                           feeders_monitor_config.py exitcams_monitor_config.py
+```
+
+Or with a glob: `python bb_monitor_multi.py *_monitor_config.py`.
+
+Each config runs in its own thread; if a thread crashes it auto-restarts after 10s. Ctrl-C exits the whole launcher.
+
 ## System check
 
 `bb_monitor_systemcheck.py` is a separate script that runs on a regular interval (hourly by default) and posts a single status message to a Telegram channel that is independent of the monitor image bot. It performs two kinds of checks:

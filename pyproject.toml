@@ -13,10 +13,11 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["bb_monitor", "bb_monitor_systemcheck"]
+py-modules = ["bb_monitor", "bb_monitor_systemcheck", "bb_monitor_multi"]
 packages = {find = {where = ["src"]}}
 
 [project.scripts]
 bb_monitor             = "bb_monitor:main"
 bb_monitor_systemcheck = "bb_monitor_systemcheck:main"
+bb_monitor_multi       = "bb_monitor_multi:main"
 

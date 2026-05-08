@@ -9,15 +9,20 @@ import cv2
 import requests
 
 
+def load_config_from_path(path):
+    """Load a Python config module from an explicit filesystem path."""
+    spec = importlib.util.spec_from_file_location(f"cfg_{os.path.basename(path)}", path)
+    cfg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cfg)
+    return cfg
+
+
 def get_config(default_module="default_config", user_module="user_config"):
     """Load config: CLI-arg path -> user_module -> default_module."""
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
         try:
-            spec = importlib.util.spec_from_file_location("cli_config", config_path)
-            cfg = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cfg)
-            return cfg
+            return load_config_from_path(config_path)
         except Exception as e:
             print(f"Failed to import CLI config at '{config_path}': {e}")
     try:
