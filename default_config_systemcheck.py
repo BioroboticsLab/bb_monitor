@@ -4,8 +4,34 @@ monitor_bot_name   = "System Check"
 telegram_bot_token = "FILL IN API TOKEN"
 telegram_chat_id   = "FILL IN TELEGRAM CHAT ID"
 
-# Run every N hours, aligned to the top of the hour.
-systemcheck_interval_hours = 1
+# Fast cadence (minutes). The loop wakes on every multiple of this past midnight,
+# but only posts to Telegram when issues are found. The first fast-tick of every
+# hour also posts an "All systems OK" summary even when there are no issues.
+systemcheck_fast_interval_minutes = 10
+
+# Cameras with bundled per-type checks.
+# - feedercam: ping + raspicam.service + raspicam heartbeat freshness
+#              + imgstorage.service + mini_scale_logger.service + scale CSV freshness
+# - exitcam:   ping + raspicam.service + raspicam heartbeat freshness + imgstorage.service
+# Per-entry keys override the defaults baked into bb_monitor_systemcheck.py
+# (raspicam heartbeat path, max-age thresholds, scale CSV glob).
+systemcheck_cameras = [
+    # {"hostname": "feedercama.local", "type": "feedercam"},
+    # {"hostname": "feedercamb.local", "type": "feedercam",
+    #  "scale_csv_glob": "~/bb_mini_scales/data/weight_data_*.csv",
+    #  "scale_max_age_seconds": 30,
+    #  "raspicam_heartbeat": "/tmp/raspicam_heartbeat",
+    #  "raspicam_max_age_seconds": 30},
+    # {"hostname": "exitcama.local",   "type": "exitcam"},
+    # {"hostname": "exitcamb.local",   "type": "exitcam"},
+]
+
+# Temperature loggers: ping + bb-templogger.service + CSV freshness.
+systemcheck_temploggers = [
+    # {"hostname": "tempbox-a.local",
+    #  "csv_glob": "~/bb_temperatureloggers/data/temperature_data_*.csv",
+    #  "max_age_seconds": 60},
+]
 
 # Hosts pinged via ICMP. Empty list = skip ping checks.
 systemcheck_ping_hosts = [
