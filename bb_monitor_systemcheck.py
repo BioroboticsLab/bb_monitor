@@ -143,14 +143,15 @@ def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=
     target = ssh_target if ssh_target is not None else host
     # Pipeline (single remote shell):
     #   - newest matching file
-    #   - last non-empty, non-header line
+    #   - last non-empty, non-header line (looking only at the tail to avoid
+    #     grep falling back to "binary file matches" if a NUL byte got written
+    #     somewhere earlier in the file; -a also forces text mode)
     #   - leading ISO timestamp -> epoch
     #   - print "<epoch> <now>" so we can diff client-side
     remote_cmd = (
         f"f=$(ls -1t {glob_pattern} 2>/dev/null | head -n1); "
         "if [ -z \"$f\" ]; then echo NO_FILE; exit 1; fi; "
-        # last non-empty line that doesn't start with 'Time' (the CSV header)
-        "last=$(grep -v '^[[:space:]]*$' \"$f\" | grep -v '^Time' | tail -n1); "
+        "last=$(tail -n 50 \"$f\" 2>/dev/null | grep -av '^Time' | grep -av '^[[:space:]]*$' | tail -n1); "
         "if [ -z \"$last\" ]; then echo NO_ROWS; exit 1; fi; "
         "ts=$(echo \"$last\" | cut -d, -f1); "
         # date -d understands the ISO 8601 timestamps the loggers write.
