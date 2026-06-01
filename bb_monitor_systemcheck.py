@@ -67,18 +67,27 @@ def _ssh_run(host, remote_cmd, ssh_timeout):
         return None, "ssh binary not found"
 
 
-def check_remote_process(host, command, match_substring, min_count, ssh_timeout=30):
+def _ssh_failed(proc, stdout):
+    """SSH exit 255 (or any non-zero exit with empty stdout) means SSH itself or
+    the remote shell never got to the real command. Caller should surface this
+    as an SSH failure, not a domain-level failure.
+    """
+    return proc.returncode == 255 or (proc.returncode != 0 and not stdout)
+
+
+def check_remote_process(host, command, match_substring, min_count, ssh_timeout=30, ssh_target=None):
     """SSH to host, run command, count substring in stdout. Return (ok, msg)."""
+    target = ssh_target if ssh_target is not None else host
     remote_cmd = " ".join(command) if isinstance(command, (list, tuple)) else command
-    proc, err = _ssh_run(host, remote_cmd, ssh_timeout)
+    proc, err = _ssh_run(target, remote_cmd, ssh_timeout)
     if proc is None:
         return False, f"{host}: {err}"
 
     stdout = proc.stdout.decode(errors="replace")
     stderr = proc.stderr.decode(errors="replace").strip()
 
-    if proc.returncode != 0 and not stdout:
-        return False, f"{host}: '{remote_cmd}' failed ({stderr or f'exit {proc.returncode}'})"
+    if _ssh_failed(proc, stdout):
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
 
     count = stdout.count(match_substring)
     if count < min_count:
@@ -86,28 +95,36 @@ def check_remote_process(host, command, match_substring, min_count, ssh_timeout=
     return True, None
 
 
-def check_remote_service(host, service, ssh_timeout=30):
+def check_remote_service(host, service, ssh_timeout=30, ssh_target=None):
     """`systemctl is-active <service>` on the remote host. Return (ok, msg)."""
-    proc, err = _ssh_run(host, f"systemctl is-active {service}", ssh_timeout)
+    target = ssh_target if ssh_target is not None else host
+    proc, err = _ssh_run(target, f"systemctl is-active {service}", ssh_timeout)
     if proc is None:
         return False, f"{host}: {err}"
     state = proc.stdout.decode(errors="replace").strip()
+    stderr = proc.stderr.decode(errors="replace").strip()
     if state == "active":
         return True, None
-    return False, f"{host}: {service} not active (state={state or 'unknown'})"
+    if _ssh_failed(proc, state):
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
+    return False, f"{host}: {service} not active (state={state})"
 
 
-def check_remote_file_mtime(host, path, max_age_seconds, ssh_timeout=30):
+def check_remote_file_mtime(host, path, max_age_seconds, ssh_timeout=30, ssh_target=None):
     """Compare remote file mtime against remote `date +%s` to avoid clock-skew."""
+    target = ssh_target if ssh_target is not None else host
     # `--` lets paths starting with - work; both timestamps come from the remote shell.
     remote_cmd = f"stat -c %Y -- {path} && date +%s"
-    proc, err = _ssh_run(host, remote_cmd, ssh_timeout)
+    proc, err = _ssh_run(target, remote_cmd, ssh_timeout)
     if proc is None:
         return False, f"{host}: {err}"
+    stdout = proc.stdout.decode(errors="replace")
+    stderr = proc.stderr.decode(errors="replace").strip()
+    if _ssh_failed(proc, stdout):
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
     if proc.returncode != 0:
-        stderr = proc.stderr.decode(errors="replace").strip()
         return False, f"{host}: stat {path} failed ({stderr or f'exit {proc.returncode}'})"
-    lines = proc.stdout.decode(errors="replace").split()
+    lines = stdout.split()
     try:
         mtime = int(lines[0])
         now = int(lines[1])
@@ -119,10 +136,11 @@ def check_remote_file_mtime(host, path, max_age_seconds, ssh_timeout=30):
     return True, None
 
 
-def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=30):
+def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=30, ssh_target=None):
     """Find newest CSV matching glob, read leading ISO timestamp on last non-empty
     data row, compare to remote `date +%s`. Returns (ok, msg).
     """
+    target = ssh_target if ssh_target is not None else host
     # Pipeline (single remote shell):
     #   - newest matching file
     #   - last non-empty, non-header line
@@ -140,10 +158,13 @@ def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=
         "if [ -z \"$epoch\" ]; then echo BAD_TS \"$ts\"; exit 1; fi; "
         "echo \"$epoch $(date +%s) $f\""
     )
-    proc, err = _ssh_run(host, remote_cmd, ssh_timeout)
+    proc, err = _ssh_run(target, remote_cmd, ssh_timeout)
     if proc is None:
         return False, f"{host}: {err}"
     out = proc.stdout.decode(errors="replace").strip()
+    stderr = proc.stderr.decode(errors="replace").strip()
+    if _ssh_failed(proc, out):
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
     if proc.returncode != 0:
         return False, f"{host}: csv-freshness {glob_pattern}: {out or 'failed'}"
     parts = out.split()
@@ -162,16 +183,24 @@ def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=
 # ---------- bundled per-host check sets ----------
 
 # Defaults applied to each camera entry; per-entry keys override.
+# ssh_user prefixes the hostname for SSH (e.g. "pi@feedercama.local"); set to
+# None or "" per-entry to ssh as the local user.
 _FEEDERCAM_DEFAULTS = {
+    "ssh_user": "pi",
     "raspicam_heartbeat": "/tmp/raspicam_heartbeat",
     "raspicam_max_age_seconds": 30,
     "scale_csv_glob": "~/bb_mini_scales/data/weight_data_*.csv",
     "scale_max_age_seconds": 30,
 }
 _EXITCAM_DEFAULTS = {
+    "ssh_user": "pi",
     "raspicam_heartbeat": "/tmp/raspicam_heartbeat",
     "raspicam_max_age_seconds": 30,
 }
+
+
+def _ssh_target_for(host, user):
+    return f"{user}@{host}" if user else host
 
 
 def _camera_checks(cam, ping_timeout, ssh_timeout):
@@ -204,21 +233,27 @@ def _camera_checks(cam, ping_timeout, ssh_timeout):
     else:
         return [f"{host}: unknown camera type {cam_type!r}"]
 
+    ssh_target = _ssh_target_for(host, merged.get("ssh_user"))
+
     for service, heartbeat_path, heartbeat_age in service_checks:
-        ok, msg = check_remote_service(host, service, ssh_timeout=ssh_timeout)
+        ok, msg = check_remote_service(
+            host, service, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
+        )
         if not ok:
             issues.append(msg)
             continue
         if heartbeat_path is not None:
             ok, msg = check_remote_file_mtime(
-                host, heartbeat_path, heartbeat_age, ssh_timeout=ssh_timeout,
+                host, heartbeat_path, heartbeat_age,
+                ssh_timeout=ssh_timeout, ssh_target=ssh_target,
             )
             if not ok:
                 issues.append(msg)
 
     if scale_glob is not None:
         ok, msg = check_remote_csv_freshness(
-            host, scale_glob, scale_age, ssh_timeout=ssh_timeout,
+            host, scale_glob, scale_age,
+            ssh_timeout=ssh_timeout, ssh_target=ssh_target,
         )
         if not ok:
             issues.append(msg)
@@ -231,13 +266,16 @@ def _templogger_checks(entry, ping_timeout, ssh_timeout):
     if not check_ping(host, timeout_seconds=ping_timeout):
         return [f"Cannot reach {host}"]
     issues = []
+    ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
     service = entry.get("service", "temperaturelogger.service")
-    ok, msg = check_remote_service(host, service, ssh_timeout=ssh_timeout)
+    ok, msg = check_remote_service(host, service, ssh_timeout=ssh_timeout, ssh_target=ssh_target)
     if not ok:
         issues.append(msg)
     glob_pattern = entry["csv_glob"]
     max_age = entry.get("max_age_seconds", 60)
-    ok, msg = check_remote_csv_freshness(host, glob_pattern, max_age, ssh_timeout=ssh_timeout)
+    ok, msg = check_remote_csv_freshness(
+        host, glob_pattern, max_age, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
+    )
     if not ok:
         issues.append(msg)
     return issues
@@ -261,6 +299,7 @@ def run_checks():
             spec["match_substring"],
             spec["min_count"],
             ssh_timeout=ssh_timeout,
+            ssh_target=_ssh_target_for(spec["hostname"], spec.get("ssh_user")),
         )
         if not ok:
             issues.append(msg)
