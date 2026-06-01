@@ -231,7 +231,7 @@ def _templogger_checks(entry, ping_timeout, ssh_timeout):
     if not check_ping(host, timeout_seconds=ping_timeout):
         return [f"Cannot reach {host}"]
     issues = []
-    service = entry.get("service", "bb-templogger.service")
+    service = entry.get("service", "temperaturelogger.service")
     ok, msg = check_remote_service(host, service, ssh_timeout=ssh_timeout)
     if not ok:
         issues.append(msg)

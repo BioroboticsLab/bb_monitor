@@ -26,10 +26,11 @@ systemcheck_cameras = [
     # {"hostname": "exitcamb.local",   "type": "exitcam"},
 ]
 
-# Temperature loggers: ping + bb-templogger.service + CSV freshness.
+# Temperature loggers: ping + temperaturelogger.service + CSV freshness.
+# Override the default service name per-entry with "service": "..." if needed.
 systemcheck_temploggers = [
-    # {"hostname": "tempbox-a.local",
-    #  "csv_glob": "~/bb_temperatureloggers/data/temperature_data_*.csv",
+    # {"hostname": "thria",
+    #  "csv_glob": "~/bb2026/bb_temperatureloggers/data/temperature_data_*.csv",
     #  "max_age_seconds": 60},
 ]
 

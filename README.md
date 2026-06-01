@@ -74,7 +74,7 @@ Four independent check lists in the config:
   - `feedercam`: ping → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active → `mini_scale_logger.service` active → mini-scale CSV last row fresh.
   - `exitcam`: ping → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active.
   If ping fails, the rest of the host's checks are skipped to avoid a wall of cascading SSH timeouts.
-- `systemcheck_temploggers` — for each entry, ping → `bb-templogger.service` active → CSV last row fresh.
+- `systemcheck_temploggers` — for each entry, ping → `temperaturelogger.service` active (override via `"service"` key) → CSV last row fresh.
 - `systemcheck_ping_hosts` — plain ICMP pings.
 - `systemcheck_process_hosts` — SSHes to the host, runs the configured command, and counts occurrences of a substring in the output. Generic enough to cover `nvidia-smi`-based GPU process checks or plain `pgrep` checks.
 
