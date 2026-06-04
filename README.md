@@ -69,6 +69,20 @@ The loop runs every `systemcheck_fast_interval_minutes` (default 10) aligned to 
 
 The "had issues last tick" state is in-memory, so a restart while an issue is outstanding can miss that single recovery message; the hourly summary still confirms all-clear within the hour.
 
+### Image on recovery
+
+On a recovery (the "All systems OK" right after an error), the system check can push a fresh monitor image so you can *visually* confirm the cameras are back. List the monitor config(s) to fire in the system-check config:
+
+```python
+systemcheck_trigger_monitor_configs = [
+    "/abs/path/feeders_monitor_config.py",
+    "/abs/path/exitcams_monitor_config.py",
+]
+systemcheck_trigger_timeout_seconds = 60  # per-config wall-clock timeout
+```
+
+Each listed config is run once via `BB_MONITOR_ONCE=1 python bb_monitor.py <config>` as an isolated subprocess (so a hung video read can't stall the check loop). The image lands in **that monitor's own image channel**, not the System Check channel. Use **absolute paths**. Leave the list empty (the default) to disable the feature — recovery then just sends the text message. The image fires once per error→clear edge, not on the routine hourly "All systems OK".
+
 ### Checks
 
 Four independent check lists in the config:

@@ -11,8 +11,10 @@ The "previous tick had issues" flag is in-memory only, so a process restart
 while an issue is outstanding can miss that single recovery message; the hourly
 summary still confirms all-clear within the hour, so it isn't persisted.
 """
+import os
 import platform
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 
@@ -330,6 +332,33 @@ def _notify(text):
         return False
 
 
+def _trigger_monitor_images():
+    """Spawn the monitor bot once per configured monitor config to push a fresh
+    image to each monitor's own Telegram feed. Used on recovery for visual
+    confirmation. Runs each send as an isolated subprocess with a timeout so a
+    hung video read (e.g. stale NFS) can never stall the system-check loop.
+    """
+    paths = getattr(config, "systemcheck_trigger_monitor_configs", [])
+    if not paths:
+        return
+    timeout = getattr(config, "systemcheck_trigger_timeout_seconds", 60)
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    monitor_script = os.path.join(repo_dir, "bb_monitor.py")
+    child_env = {**os.environ, "BB_MONITOR_ONCE": "1"}
+    for cfg_path in paths:
+        try:
+            subprocess.run(
+                [sys.executable, monitor_script, cfg_path],  # same venv via sys.executable
+                cwd=repo_dir,                                # so `import src.mon` resolves
+                env=child_env,
+                timeout=timeout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except Exception as e:
+            print(f"Failed to trigger monitor image for {cfg_path}: {e}", flush=True)
+
+
 def main():
     print("Starting bb_monitor_systemcheck...")
     fast_minutes = max(1, int(getattr(config, "systemcheck_fast_interval_minutes", 10)))
@@ -339,6 +368,8 @@ def main():
         issues = run_checks()
         # The first fast tick of every hour also emits the "all OK" sanity ping.
         is_hourly_tick = loop_start.minute < fast_minutes
+        # Recovery = the error->clear edge (captured before previous_had_issues is mutated).
+        is_recovery = (not issues) and previous_had_issues
 
         if issues:
             _notify("Issues found:\n" + "\n".join(f"- {i}" for i in issues))
@@ -352,6 +383,11 @@ def main():
                 # Clear only on a confirmed send so a failed recovery is retried next
                 # tick; when already False (plain hourly tick) this is a safe no-op.
                 previous_had_issues = False
+                # On a genuine recovery (not a plain hourly OK), push a fresh monitor
+                # image so the cameras can be visually confirmed back. Gating on the
+                # confirmed send means exactly one image per error->clear edge.
+                if is_recovery:
+                    _trigger_monitor_images()
         else:
             print(f"[{loop_start.isoformat(timespec='seconds')}] all OK (silent)", flush=True)
 

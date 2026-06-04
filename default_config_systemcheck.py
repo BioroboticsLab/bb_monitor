@@ -11,6 +11,19 @@ telegram_chat_id   = "FILL IN TELEGRAM CHAT ID"
 # when there are no issues.
 systemcheck_fast_interval_minutes = 10
 
+# --- On-demand monitor image on recovery (off by default) ---
+# When the system check detects a recovery (an "All systems OK" right after an
+# error), it spawns the monitor bot once per config listed below to push a fresh
+# image to that monitor's own image channel — so you can visually confirm the
+# cameras are back. Leave the list empty to disable. Use ABSOLUTE paths (each
+# child runs with cwd = this repo).
+systemcheck_trigger_monitor_configs = [
+    # "/home/pi/bb_monitor/feeders_monitor_config.py",
+    # "/home/pi/bb_monitor/exitcams_monitor_config.py",
+]
+# Per-config wall-clock timeout (seconds) for the one-shot image send.
+systemcheck_trigger_timeout_seconds = 60
+
 # Cameras with bundled per-type checks.
 # - feedercam: ping + raspicam.service + raspicam heartbeat freshness
 #              + imgstorage.service + mini_scale_logger.service + scale CSV freshness

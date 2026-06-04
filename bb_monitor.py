@@ -86,83 +86,95 @@ def add_text_to_image(image, text, position=(0.02,0.1), font_scale_relative=0.00
 
 
 ######
+def send_composite_now(config) -> bool:
+    """Fetch the latest videos, build the stamped composite image, and send it.
+
+    Returns True if a composite image was sent, False if it sent the no-frames
+    "Error" fallback message (or no image could be built). Reused by both the
+    scheduled loop in wait_and_get_images and the one-shot BB_MONITOR_ONCE path.
+    """
+    latest_videos = find_most_recent_files(config.input_basedir, config.input_subdir_names, config.file_type)
+    images = [extract_first_frame(vid) for vid in latest_videos]
+
+    # Prepare to make a composite image
+    # Stamp each image with its filename before joining
+    stamped_images = []
+    for image, videoname in zip(images, latest_videos):
+        if image is not None:
+            filename = os.path.basename(videoname)
+            # get camtext by pasing the filename
+            # 1) try the Basler parser
+            try:
+                cam_id, start, end = parse_video_fname(filename, format='basler')
+                # tag it as UTC then convert to CEST
+                start = start.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
+                hour   = f"{start.hour:02d}"
+                minute = f"{start.minute:02d}"
+                day    = f"{start.day:02d}"
+                month  = f"{start.month:02d}"
+                camtext = f"cam{cam_id}  {hour}:{minute}  {day}.{month}"
+            except Exception:
+                # 2) try the Pi-h264 timestamp
+                try:
+                    fname = os.path.basename(filename)
+                    timestamp_str = fname.split('_')[-1].replace('.h264', '')
+                    camname = fname.split('_')[0]
+                    dt = datetime.strptime(timestamp_str, '%Y-%m-%d-%H-%M-%S')
+                    hour   = f"{dt.hour:02d}"
+                    minute = f"{dt.minute:02d}"
+                    day    = f"{dt.day:02d}"
+                    month  = f"{dt.month:02d}"
+                    camtext = f"{camname} {hour}:{minute}  {day}.{month}"
+                except Exception:
+                    # 3) fallback to bare filename
+                    camtext = os.path.splitext(os.path.basename(videoname))[0]
+
+            # rotate image
+            image = rotate_image(image,config.rotate)
+            # Add filename as text to the image
+            stamped_image = add_text_to_image(image, camtext)
+            stamped_images.append(stamped_image)
+        else:
+            stamped_images.append(None)
+    composite_image = join_images(stamped_images)
+    if composite_image is not None:
+        composite_image = resize_image(composite_image,width=config.image_width)
+        composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.4,0.12),font_scale_relative=0.002)
+        # send image to message bot
+        mon.process_image_and_send(config,composite_image)
+        print(f"[{config.monitor_bot_name}] Sent image at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        return True
+    else:  # send an error message
+        mon.send_message(config,"Error: "+datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        print(f"[{config.monitor_bot_name}] Error at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        return False
+
+
+######
 def wait_and_get_images(config):
     # initialize
-    messagebot_counter = 1 
+    messagebot_counter = 1
 
     while True:
         lasttime = datetime.now()
         sendmsgnow = (messagebot_counter==config.timer_messagebot_multiplier)
 
-        if (config.save_images==True) or (sendmsgnow==True):
+        if config.save_images:  # save each frame to its associated output directory
             latest_videos = find_most_recent_files(config.input_basedir, config.input_subdir_names, config.file_type)
             images = [extract_first_frame(vid) for vid in latest_videos]
-            if config.save_images: # save each image to associated output directory
-                for image,videoname,subdir in zip (images, latest_videos, config.input_subdir_names):
-                    if image is not None:
-                        image_name = os.path.splitext(os.path.basename(videoname))[0] + ".png"
-                        savedir = os.path.join(config.output_basedir,subdir)
-                        if not os.path.exists(savedir):
-                            os.makedirs(savedir)
-                        cv2.imwrite(os.path.join(savedir,image_name), image)
+            for image,videoname,subdir in zip (images, latest_videos, config.input_subdir_names):
+                if image is not None:
+                    image_name = os.path.splitext(os.path.basename(videoname))[0] + ".png"
+                    savedir = os.path.join(config.output_basedir,subdir)
+                    if not os.path.exists(savedir):
+                        os.makedirs(savedir)
+                    cv2.imwrite(os.path.join(savedir,image_name), image)
 
-            if sendmsgnow:
-                # Prepare to make a composite image
-                # Stamp each image with its filename before joining
-                stamped_images = []
-                for image, videoname in zip(images, latest_videos):
-                    if image is not None:
-                        filename = os.path.basename(videoname)
-                        # get camtext by pasing the filename
-                        # 1) try the Basler parser
-                        try:
-                            cam_id, start, end = parse_video_fname(filename, format='basler')
-                            # tag it as UTC then convert to CEST
-                            start = start.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
-                            hour   = f"{start.hour:02d}"
-                            minute = f"{start.minute:02d}"
-                            day    = f"{start.day:02d}"
-                            month  = f"{start.month:02d}"
-                            camtext = f"cam{cam_id}  {hour}:{minute}  {day}.{month}"
-                        except Exception:
-                            # 2) try the Pi‐h264 timestamp
-                            try:
-                                fname = os.path.basename(filename)
-                                timestamp_str = fname.split('_')[-1].replace('.h264', '')
-                                camname = fname.split('_')[0]
-                                dt = datetime.strptime(timestamp_str, '%Y-%m-%d-%H-%M-%S')
-                                # dt is naive GMT → mark & convert
-                                # dt = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Berlin"))
-                                hour   = f"{dt.hour:02d}"
-                                minute = f"{dt.minute:02d}"
-                                day    = f"{dt.day:02d}"
-                                month  = f"{dt.month:02d}"
-                                camtext = f"{camname} {hour}:{minute}  {day}.{month}"
-                            except Exception:
-                                # 3) fallback to bare filename
-                                camtext = os.path.splitext(os.path.basename(videoname))[0]
-
-                        # rotate image
-                        image = rotate_image(image,config.rotate)
-                        # Add filename as text to the image
-                        stamped_image = add_text_to_image(image, camtext)
-                        stamped_images.append(stamped_image)
-                    else:
-                        stamped_images.append(None)
-                composite_image = join_images(stamped_images)
-                if composite_image is not None:
-                    # composite_image = rotate_image(composite_image,config.rotate)
-                    composite_image = resize_image(composite_image,width=config.image_width)
-                    composite_image = add_text_to_image(composite_image,config.monitor_bot_name,position=(0.4,0.12),font_scale_relative=0.002)
-                    # send image to message bot
-                    mon.process_image_and_send(config,composite_image)
-                    print(f"[{config.monitor_bot_name}] Sent image at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                else: # send an error message
-                    mon.send_message(config,"Error: "+datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    print(f"[{config.monitor_bot_name}] Error at",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                messagebot_counter = 1
-            else:
-                messagebot_counter = messagebot_counter + 1
+        if sendmsgnow:
+            send_composite_now(config)
+            messagebot_counter = 1
+        else:
+            messagebot_counter = messagebot_counter + 1
 
         # correct time to wait by any script processing time
         current_time = datetime.now()
@@ -172,6 +184,13 @@ def wait_and_get_images(config):
 
 def main():
     print("Starting...")
+    # One-shot mode: send a single composite image and exit. Used by the system
+    # check to push a fresh image on recovery (see bb_monitor_systemcheck.py).
+    # An env var is used rather than a CLI flag because mon.get_config() treats
+    # argv[1] as the config path.
+    if os.environ.get("BB_MONITOR_ONCE"):
+        send_composite_now(config)
+        return
     wait_and_get_images(config)
 
 
