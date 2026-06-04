@@ -64,7 +64,10 @@ Each config runs in its own thread; if a thread crashes it auto-restarts after 1
 The loop runs every `systemcheck_fast_interval_minutes` (default 10) aligned to the wall clock (`:00`, `:10`, `:20`, ...). On every tick:
 
 - If any issue is found, a Telegram message lists the issues — the **immediate alert**.
+- The first clean tick *after* an alert posts a one-time "All systems OK" **recovery** message, then the loop goes silent again — so you know when a problem has cleared without waiting for the hourly summary.
 - If everything is fine, the tick is silent — *except* the first fast-tick of each hour, which always posts an "All systems OK" summary so a silent failure of the systemcheck process itself eventually becomes visible.
+
+The "had issues last tick" state is in-memory, so a restart while an issue is outstanding can miss that single recovery message; the hourly summary still confirms all-clear within the hour.
 
 ### Checks
 

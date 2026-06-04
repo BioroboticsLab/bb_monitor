@@ -1,10 +1,15 @@
 """System-check loop for bb_monitor.
 
 Runs camera/templogger/process checks on a fast cadence (default every 10 min),
-silently when everything is OK and immediately on any issue. Once per hour the
-loop also emits a sanity-check "all systems OK" summary even when there is
-nothing to report. Posts go to a Telegram channel independent of the monitor
-image bot.
+silently when everything is OK and immediately on any issue. The first clean
+tick after an issue posts a one-time "all systems OK" recovery message, then the
+loop goes quiet again. Once per hour the loop also emits a sanity-check
+"all systems OK" summary even when there is nothing to report. Posts go to a
+Telegram channel independent of the monitor image bot.
+
+The "previous tick had issues" flag is in-memory only, so a process restart
+while an issue is outstanding can miss that single recovery message; the hourly
+summary still confirms all-clear within the hour, so it isn't persisted.
 """
 import platform
 import subprocess
@@ -314,9 +319,21 @@ def run_checks():
     return issues
 
 
+def _notify(text):
+    """Send a Telegram message; return True only on a confirmed successful send.
+    Collapses both a raised exception and an `ok == False` API response to False.
+    """
+    try:
+        return bool(mon.send_message(config, text))
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}", flush=True)
+        return False
+
+
 def main():
     print("Starting bb_monitor_systemcheck...")
     fast_minutes = max(1, int(getattr(config, "systemcheck_fast_interval_minutes", 10)))
+    previous_had_issues = False
     while True:
         loop_start = datetime.now()
         issues = run_checks()
@@ -324,16 +341,17 @@ def main():
         is_hourly_tick = loop_start.minute < fast_minutes
 
         if issues:
-            text = "Issues found:\n" + "\n".join(f"- {i}" for i in issues)
-            try:
-                mon.send_message(config, text)
-            except Exception as e:
-                print(f"Failed to send Telegram message: {e}", flush=True)
-        elif is_hourly_tick:
-            try:
-                mon.send_message(config, "All systems OK")
-            except Exception as e:
-                print(f"Failed to send Telegram message: {e}", flush=True)
+            _notify("Issues found:\n" + "\n".join(f"- {i}" for i in issues))
+            # Set unconditionally: the system did have issues even if the alert
+            # couldn't be delivered, so the next clean tick should still recover.
+            previous_had_issues = True
+        elif previous_had_issues or is_hourly_tick:
+            # Recovery ("previous tick had issues") and the hourly sanity ping send
+            # the same text, so they share one branch — and coincide as a single send.
+            if _notify("All systems OK"):
+                # Clear only on a confirmed send so a failed recovery is retried next
+                # tick; when already False (plain hourly tick) this is a safe no-op.
+                previous_had_issues = False
         else:
             print(f"[{loop_start.isoformat(timespec='seconds')}] all OK (silent)", flush=True)
 

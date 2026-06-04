@@ -5,8 +5,10 @@ telegram_bot_token = "FILL IN API TOKEN"
 telegram_chat_id   = "FILL IN TELEGRAM CHAT ID"
 
 # Fast cadence (minutes). The loop wakes on every multiple of this past midnight,
-# but only posts to Telegram when issues are found. The first fast-tick of every
-# hour also posts an "All systems OK" summary even when there are no issues.
+# but only posts to Telegram when issues are found. The first clean tick after an
+# issue posts a one-time "All systems OK" recovery message, then goes silent again.
+# The first fast-tick of every hour also posts an "All systems OK" summary even
+# when there are no issues.
 systemcheck_fast_interval_minutes = 10
 
 # Cameras with bundled per-type checks.
