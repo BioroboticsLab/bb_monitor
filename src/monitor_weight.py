@@ -14,7 +14,6 @@ SCALES = [
     {"dir": "feedercamd", "label": "Scale D", "letter": "D"},
 ]
 WINDOW_DAYS = 7
-UPDATE_INTERVAL_SECONDS = 3600
 TREATMENT_DAYS = {1, 2}        # tue=1, wed=2 (python weeks start monday)
 RESAMPLE_MIN = 5               # group readings into 5 min bins
 EMA_SPAN = max(1, 10 // RESAMPLE_MIN)        # smooth over ~10 min
@@ -151,8 +150,6 @@ def draw_plot(fig, axes, save_path):
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     fig.canvas.draw()
     fig.canvas.flush_events()
-    print(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Next update in {UPDATE_INTERVAL_SECONDS // 60} minutes")
 
 
 if __name__ == "__main__":
@@ -160,6 +157,11 @@ if __name__ == "__main__":
     # sized for a phone screen in portrait
     fig, axes = plt.subplots(4, 1, figsize=(7.2, 14.4))
 
+    UPDATE_INTERVAL_SECONDS = 3600  # update every hour
+    SAVE_PATH = "/home/beesbook/bb_monitoring/figs/weight_plot.png"
+
     while True:
-        draw_plot(fig, axes)
+        draw_plot(fig, axes, save_path=SAVE_PATH)
+        print(f"Last updated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Next update in {UPDATE_INTERVAL_SECONDS // 60} minutes")
         plt.pause(UPDATE_INTERVAL_SECONDS)
