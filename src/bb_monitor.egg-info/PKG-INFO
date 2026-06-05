@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: bb_monitor
+Version: 0.0.1
+License-File: LICENSE
+Requires-Dist: numpy>=1.24
+Requires-Dist: opencv-python>=4.7
+Requires-Dist: requests>=2.31
+Dynamic: license-file

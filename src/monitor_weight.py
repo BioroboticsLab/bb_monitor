@@ -1,4 +1,5 @@
 import glob
+import os
 import time
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -98,6 +99,7 @@ def shade_treatment_days(ax, start_time, end_time):
 
 
 def draw_plot(fig, axes, save_path):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.clf()
     axes = fig.subplots(4, 1)
     fig.suptitle("Feeder Consumption — Last 7 Days", fontsize=18, fontweight="bold")
@@ -158,7 +160,7 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(4, 1, figsize=(7.2, 14.4))
 
     UPDATE_INTERVAL_SECONDS = 3600  # update every hour
-    SAVE_PATH = "/home/beesbook/bb_monitoring/figs/weight_plot.png"
+    SAVE_PATH = "/home/beesbook/bb_monitor/figs/weight_plot.png"
 
     while True:
         draw_plot(fig, axes, save_path=SAVE_PATH)

@@ -6,3 +6,7 @@ user_config_systemcheck.py
 .DS_Store
 /bb_monitor.egg-info
 /.ipynb_checkpoints
+cache/
+figs/
+__pycache__/
+figs/*.png
