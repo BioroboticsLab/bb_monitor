@@ -13,8 +13,8 @@ from bb_behavior.tracking import detect_markers_in_video
 BASE_DIR             = "/mnt/trove/beesbook2026/single_video_frames"
 WINDOW_DAYS          = 7
 TREATMENT_DAYS       = {1, 2}    # tue=1, wed=2
-BIN_MIN              = 10        # 10-min bins
-ROLL_WIN             = 6         # rolling mean over 6 bins = 1 hour
+BIN_MIN              = 15        # 15-min bins, one image per bin
+ROLL_WIN             = 24        # rolling mean over 24 bins = 6 hours
 CACHE_DIR            = "/home/beesbook/bb_monitor/cache"
 
 HIVES = [
@@ -29,6 +29,8 @@ COLORS = {
     "untagged_front": "cornflowerblue",
     "tagged_rear":    "coral",
     "tagged_front":   "tomato",
+    "cumul_rear":     "firebrick",
+    "cumul_front":    "darkorange",
 }
 
 
@@ -78,10 +80,15 @@ def detect_bees(image_path):
 
     df = video_dataframe
     df = df[df["localizerSaliency"] >= 0.5]
-    df_tp_tagged   = df[df["detection_type"] == "TaggedBee"]
-    df_tp_untagged = df[df["detection_type"] != "TaggedBee"]
 
-    return df_tp_tagged, df_tp_untagged
+    tagged_ids     = set()
+    untagged_count = len(df[df["detection_type"] != "TaggedBee"])
+
+    for _, row in df[df["detection_type"] == "TaggedBee"].iterrows():
+        if row["beeID"] is not None:
+            tagged_ids.add(int(np.array(row["beeID"]).argmax()))
+
+    return tagged_ids, untagged_count
 
 
 def load_cam_data(cam, end_time, start_time):
@@ -118,7 +125,8 @@ def load_cam_data(cam, end_time, start_time):
         except OSError:
             continue
         cached = cached_images.get(f)
-        if cached is None or cached.get("file_mtime") != mtime:
+        # reprocess if new, mtime changed, or old cache entry missing fields
+        if cached is None or cached.get("file_mtime") != mtime or "tagged_ids" not in cached or "untagged_count" not in cached:
             files_to_process.append(item)
         else:
             updated_images.append(cached)
@@ -128,15 +136,15 @@ def load_cam_data(cam, end_time, start_time):
         clip_time = item["clip_time"]
         res = detect_bees(f)
         if res is not None:
-            tagged_df, untagged_df = res
+            tagged_ids, untagged_count = res
             updated_images.append({
                 "clip_time":      clip_time,
                 "file_path":      f,
                 "file_mtime":     os.path.getmtime(f),
-                "tagged_count":   len(tagged_df),
-                "untagged_count": len(untagged_df),
+                "tagged_ids":     tagged_ids,
+                "untagged_count": untagged_count,
             })
-            print(f"Processed {f}: tagged={len(tagged_df)}, untagged={len(untagged_df)}")
+            print(f"Processed {f}: {len(tagged_ids)} tagged IDs, {untagged_count} untagged")
         else:
             print(f"Failed to process {f}")
 
@@ -148,15 +156,34 @@ def load_cam_data(cam, end_time, start_time):
     if not updated_images:
         return None
 
-    df_results = pd.DataFrame(updated_images).set_index("clip_time")
+    freq = f"{BIN_MIN}min"
 
-    freq     = f"{BIN_MIN}min"
-    raw_u    = df_results["untagged_count"].resample(freq).mean().fillna(0)
+    # untagged: mean count per bin, smoothed
+    u_series = pd.Series({img["clip_time"]: img["untagged_count"] for img in updated_images})
+    raw_u    = u_series.resample(freq).mean().fillna(0)
     smooth_u = raw_u.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
-    raw_t    = df_results["tagged_count"].resample(freq).mean().fillna(0)
+
+    # tagged: union all IDs seen within each bin, then smooth the count
+    id_series = pd.Series({img["clip_time"]: img["tagged_ids"] for img in updated_images})
+    bins      = id_series.resample(freq).apply(
+        lambda x: set().union(*x) if len(x) > 0 else set()
+    )
+    raw_t    = bins.apply(len).rename("raw")
     smooth_t = raw_t.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
 
-    return smooth_u, smooth_t
+    # cumulative unique tagged IDs seen since midnight, resets each day
+    seen_today  = set()
+    current_day = None
+    cumulative  = pd.Series(index=bins.index, dtype=float)
+    for ts, ids in bins.items():
+        day = ts.normalize()
+        if day != current_day:
+            seen_today  = set()
+            current_day = day
+        seen_today |= ids
+        cumulative[ts] = len(seen_today)
+
+    return smooth_u, raw_t, smooth_t, cumulative
 
 
 def shade_treatment_days(ax, start_time, end_time):
@@ -197,7 +224,7 @@ def draw_plot(fig, axes, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.clf()
     axes = fig.subplots(4, 1)
-    fig.suptitle("Number of Bees in the Hive — Last 7 Days", fontsize=18, fontweight="bold")
+    fig.suptitle("Bees in the Hive — Last 7 Days", fontsize=18, fontweight="bold")
 
     end_time, start_time = get_global_times()
 
@@ -206,30 +233,40 @@ def draw_plot(fig, axes, save_path):
 
     for ax, hive in zip(axes, HIVES):
         ax.set_title(hive["label"], fontsize=15, fontweight="bold")
-        ax.set_ylabel("Untagged Bees", fontsize=10)
+        ax.set_ylabel("Untagged bees", fontsize=10, color="steelblue")
+        ax.tick_params(axis="y", labelcolor="steelblue", labelsize=10)
         ax.grid(True, alpha=0.3, zorder=1)
         shade_treatment_days(ax, start_time, end_time)
 
         ax2 = ax.twinx()
-        ax2.set_ylabel("Tagged Bees", fontsize=10)
+        ax2.set_ylabel("Tagged unique IDs (per bin / cumulative)", fontsize=10, color="coral")
+        ax2.tick_params(axis="y", labelcolor="coral", labelsize=10)
 
-        rear_data = load_cam_data(hive["cam_rear"], end_time, start_time)
-        if rear_data:
-            smooth_u_r, smooth_t_r = rear_data
-            ax.plot(smooth_u_r.index,  smooth_u_r.values,  lw=2.0, color=COLORS["untagged_rear"],  label="Untagged (rear)")
-            ax2.plot(smooth_t_r.index, smooth_t_r.values,  lw=2.0, color=COLORS["tagged_rear"],    label="Tagged (rear)")
-
+        rear_data  = load_cam_data(hive["cam_rear"],  end_time, start_time)
         front_data = load_cam_data(hive["cam_front"], end_time, start_time)
-        if front_data:
-            smooth_u_f, smooth_t_f = front_data
-            ax.plot(smooth_u_f.index,  smooth_u_f.values,  lw=2.0, color=COLORS["untagged_front"], label="Untagged (front)")
-            ax2.plot(smooth_t_f.index, smooth_t_f.values,  lw=2.0, color=COLORS["tagged_front"],   label="Tagged (front)")
 
-        if not rear_data and not front_data:
+        if rear_data is None and front_data is None:
             ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
                     ha="center", va="center", color="gray", fontsize=13)
             ax2.set_yticks([])
         else:
+            if rear_data is not None:
+                smooth_u_r, raw_t_r, smooth_t_r, cumul_r = rear_data
+                ax.plot(smooth_u_r.index, smooth_u_r.values, lw=2.0, color=COLORS["untagged_rear"],  zorder=3, label="Untagged (rear)")
+                ax2.plot(raw_t_r.index,   raw_t_r.values,    lw=0.5, color=COLORS["tagged_rear"],    alpha=0.3, zorder=2)
+                ax2.plot(smooth_t_r.index, smooth_t_r.values, lw=2.0, color=COLORS["tagged_rear"],   zorder=3, label="Tagged/bin (rear)")
+                ax2.plot(cumul_r.index,   cumul_r.values,    lw=2.0, color=COLORS["cumul_rear"],     zorder=3, label="Tagged cumul. (rear)", linestyle="dashed")
+
+            if front_data is not None:
+                smooth_u_f, raw_t_f, smooth_t_f, cumul_f = front_data
+                ax.plot(smooth_u_f.index, smooth_u_f.values, lw=2.0, color=COLORS["untagged_front"], zorder=3, label="Untagged (front)")
+                ax2.plot(raw_t_f.index,   raw_t_f.values,    lw=0.5, color=COLORS["tagged_front"],   alpha=0.3, zorder=2)
+                ax2.plot(smooth_t_f.index, smooth_t_f.values, lw=2.0, color=COLORS["tagged_front"],  zorder=3, label="Tagged/bin (front)")
+                ax2.plot(cumul_f.index,   cumul_f.values,    lw=2.0, color=COLORS["cumul_front"],    zorder=3, label="Tagged cumul. (front)", linestyle="dashed")
+
+            ax.set_ylim(bottom=0)
+            ax2.set_ylim(bottom=0)
+
             lines_1, labels_1 = ax.get_legend_handles_labels()
             lines_2, labels_2 = ax2.get_legend_handles_labels()
             if not legend_added:
@@ -241,8 +278,6 @@ def draw_plot(fig, axes, save_path):
                 ax.legend(lines_1 + lines_2, labels_1 + labels_2,
                           loc="upper left", fontsize=9, framealpha=0.7, ncol=2)
 
-        ax.set_ylim(bottom=0)
-        ax2.set_ylim(bottom=0)
         ax.set_xlim(start_time, end_time)
         ax.xaxis.set_major_locator(mdates.DayLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %m-%d"))
