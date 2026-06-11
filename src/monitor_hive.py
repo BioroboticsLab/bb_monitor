@@ -6,15 +6,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
+from collections import defaultdict
 from datetime import timedelta
 from bb_binary import parse_video_fname
 from bb_behavior.tracking import detect_markers_in_video
+from bb_utils.ids import BeesbookID
 
 BASE_DIR             = "/mnt/trove/beesbook2026/single_video_frames"
 WINDOW_DAYS          = 7
 TREATMENT_DAYS       = {1, 2}    # tue=1, wed=2
 BIN_MIN              = 15        # 15-min bins, one image per bin
 ROLL_WIN             = 24        # rolling mean over 24 bins = 6 hours
+MIN_SNAPSHOTS        = 3         # ID must appear in >= 3 bins within 24h to be counted
 CACHE_DIR            = "/home/beesbook/bb_monitor/cache"
 
 HIVES = [
@@ -27,10 +30,8 @@ HIVES = [
 COLORS = {
     "untagged_rear":  "steelblue",
     "untagged_front": "cornflowerblue",
-    "tagged_rear":    "coral",
-    "tagged_front":   "tomato",
-    "cumul_rear":     "firebrick",
-    "cumul_front":    "darkorange",
+    "cumul_rear":     "coral",
+    "cumul_front":    "tomato",
 }
 
 
@@ -86,7 +87,11 @@ def detect_bees(image_path):
 
     for _, row in df[df["detection_type"] == "TaggedBee"].iterrows():
         if row["beeID"] is not None:
-            tagged_ids.add(int(np.array(row["beeID"]).argmax()))
+            try:
+                bee_id = BeesbookID.from_bb_binary(np.array(row["beeID"])).as_ferwar()
+                tagged_ids.add(bee_id)
+            except Exception:
+                pass
 
     return tagged_ids, untagged_count
 
@@ -163,27 +168,40 @@ def load_cam_data(cam, end_time, start_time):
     raw_u    = u_series.resample(freq).mean().fillna(0)
     smooth_u = raw_u.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
 
-    # tagged: union all IDs seen within each bin, then smooth the count
-    id_series = pd.Series({img["clip_time"]: img["tagged_ids"] for img in updated_images})
+    return smooth_u, updated_images
+
+
+def compute_union_rolling(rear_images, front_images):
+    # merge images from both cameras and bin by 15 min
+    all_images = (rear_images or []) + (front_images or [])
+    if not all_images:
+        return None
+
+    freq     = f"{BIN_MIN}min"
+    id_series = pd.Series(
+        [img["tagged_ids"] for img in all_images],
+        index=[img["clip_time"] for img in all_images],
+    )
     bins      = id_series.resample(freq).apply(
         lambda x: set().union(*x) if len(x) > 0 else set()
     )
-    raw_t    = bins.apply(len).rename("raw")
-    smooth_t = raw_t.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
 
-    # cumulative unique tagged IDs seen since midnight, resets each day
-    seen_today  = set()
-    current_day = None
-    cumulative  = pd.Series(index=bins.index, dtype=float)
-    for ts, ids in bins.items():
-        day = ts.normalize()
-        if day != current_day:
-            seen_today  = set()
-            current_day = day
-        seen_today |= ids
-        cumulative[ts] = len(seen_today)
+    # for each bin, count IDs seen >= MIN_SNAPSHOTS times in the preceding 24h
+    window     = pd.Timedelta(hours=24)
+    bins_list  = list(bins.items())
+    rolling    = {}
+    for i, (ts, _) in enumerate(bins_list):
+        window_start = ts - window
+        id_counts    = defaultdict(int)
+        for j in range(i, -1, -1):
+            t_j, ids_j = bins_list[j]
+            if t_j < window_start:
+                break
+            for bee_id in ids_j:
+                id_counts[bee_id] += 1
+        rolling[ts] = sum(1 for c in id_counts.values() if c >= MIN_SNAPSHOTS)
 
-    return smooth_u, raw_t, smooth_t, cumulative
+    return pd.Series(rolling)
 
 
 def shade_treatment_days(ax, start_time, end_time):
@@ -239,11 +257,14 @@ def draw_plot(fig, axes, save_path):
         shade_treatment_days(ax, start_time, end_time)
 
         ax2 = ax.twinx()
-        ax2.set_ylabel("Tagged unique IDs (per bin / cumulative)", fontsize=10, color="coral")
+        ax2.set_ylabel("Tagged unique IDs (rolling 24h)", fontsize=10, color="coral")
         ax2.tick_params(axis="y", labelcolor="coral", labelsize=10)
 
         rear_data  = load_cam_data(hive["cam_rear"],  end_time, start_time)
         front_data = load_cam_data(hive["cam_front"], end_time, start_time)
+
+        rear_images  = rear_data[1]  if rear_data  is not None else None
+        front_images = front_data[1] if front_data is not None else None
 
         if rear_data is None and front_data is None:
             ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
@@ -251,18 +272,16 @@ def draw_plot(fig, axes, save_path):
             ax2.set_yticks([])
         else:
             if rear_data is not None:
-                smooth_u_r, raw_t_r, smooth_t_r, cumul_r = rear_data
-                ax.plot(smooth_u_r.index, smooth_u_r.values, lw=2.0, color=COLORS["untagged_rear"],  zorder=3, label="Untagged (rear)")
-                ax2.plot(raw_t_r.index,   raw_t_r.values,    lw=0.5, color=COLORS["tagged_rear"],    alpha=0.3, zorder=2)
-                ax2.plot(smooth_t_r.index, smooth_t_r.values, lw=2.0, color=COLORS["tagged_rear"],   zorder=3, label="Tagged/bin (rear)")
-                ax2.plot(cumul_r.index,   cumul_r.values,    lw=2.0, color=COLORS["cumul_rear"],     zorder=3, label="Tagged cumul. (rear)", linestyle="dashed")
+                smooth_u_r, _ = rear_data
+                ax.plot(smooth_u_r.index, smooth_u_r.values, lw=2.0, color=COLORS["untagged_rear"], zorder=3, label="Untagged (rear)")
 
             if front_data is not None:
-                smooth_u_f, raw_t_f, smooth_t_f, cumul_f = front_data
+                smooth_u_f, _ = front_data
                 ax.plot(smooth_u_f.index, smooth_u_f.values, lw=2.0, color=COLORS["untagged_front"], zorder=3, label="Untagged (front)")
-                ax2.plot(raw_t_f.index,   raw_t_f.values,    lw=0.5, color=COLORS["tagged_front"],   alpha=0.3, zorder=2)
-                ax2.plot(smooth_t_f.index, smooth_t_f.values, lw=2.0, color=COLORS["tagged_front"],  zorder=3, label="Tagged/bin (front)")
-                ax2.plot(cumul_f.index,   cumul_f.values,    lw=2.0, color=COLORS["cumul_front"],    zorder=3, label="Tagged cumul. (front)", linestyle="dashed")
+
+            rolling_union = compute_union_rolling(rear_images, front_images)
+            if rolling_union is not None:
+                ax2.plot(rolling_union.index, rolling_union.values, lw=2.0, color=COLORS["cumul_rear"], zorder=3, label="Tagged unique IDs")
 
             ax.set_ylim(bottom=0)
             ax2.set_ylim(bottom=0)
@@ -272,11 +291,11 @@ def draw_plot(fig, axes, save_path):
             if not legend_added:
                 ax.legend([treatment_patch] + lines_1 + lines_2,
                           [treatment_patch.get_label()] + labels_1 + labels_2,
-                          loc="upper left", fontsize=9, framealpha=0.7, ncol=2)
+                          loc="lower left", fontsize=9, framealpha=0.7, ncol=2)
                 legend_added = True
             else:
                 ax.legend(lines_1 + lines_2, labels_1 + labels_2,
-                          loc="upper left", fontsize=9, framealpha=0.7, ncol=2)
+                          loc="lower left", fontsize=9, framealpha=0.7, ncol=2)
 
         ax.set_xlim(start_time, end_time)
         ax.xaxis.set_major_locator(mdates.DayLocator())

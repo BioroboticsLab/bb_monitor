@@ -3,6 +3,7 @@ import glob
 import os
 import numpy as np
 import pandas as pd
+from bb_utils.ids import BeesbookID
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
@@ -72,7 +73,11 @@ def parse_parquet_file(file_path):
             max_simultaneous = int(u.groupby("frameIdx").size().max())
         for _, row in df[det == "TaggedBee"].iterrows():
             if row["beeID"] is not None:
-                tagged_ids.add(int(np.array(row["beeID"]).argmax()))
+                try:
+                    bee_id = BeesbookID.from_bb_binary(np.array(row["beeID"])).as_ferwar()
+                    tagged_ids.add(bee_id)
+                except Exception:
+                    pass
 
     return [{
         "clip_time": clip_time,
