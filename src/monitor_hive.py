@@ -21,17 +21,17 @@ MIN_SNAPSHOTS        = 3         # ID must appear in >= 3 bins within 24h to be 
 CACHE_DIR            = "/home/beesbook/bb_monitor/cache"
 
 HIVES = [
-    {"label": "Hive A", "cam_rear": "cam-0", "cam_front": "cam-1"},
-    {"label": "Hive B", "cam_rear": "cam-2", "cam_front": "cam-3"},
-    {"label": "Hive C", "cam_rear": "cam-4", "cam_front": "cam-5"},
-    {"label": "Hive D", "cam_rear": "cam-6", "cam_front": "cam-7"},
+    {"label": "Hive A", "cam_left": "cam-0", "cam_right": "cam-1"},
+    {"label": "Hive B", "cam_left": "cam-2", "cam_right": "cam-3"},
+    {"label": "Hive C", "cam_left": "cam-4", "cam_right": "cam-5"},
+    {"label": "Hive D", "cam_left": "cam-6", "cam_right": "cam-7"},
 ]
 
 COLORS = {
-    "untagged_rear":  "steelblue",
-    "untagged_front": "cornflowerblue",
-    "cumul_rear":     "coral",
-    "cumul_front":    "tomato",
+    "untagged_left":  "steelblue",
+    "untagged_right": "cornflowerblue",
+    "cumul_left":     "coral",
+    "cumul_right":    "tomato",
 }
 
 
@@ -171,9 +171,9 @@ def load_cam_data(cam, end_time, start_time):
     return smooth_u, updated_images
 
 
-def compute_union_rolling(rear_images, front_images):
+def compute_union_rolling(left_images, right_images):
     # merge images from both cameras and bin by 15 min
-    all_images = (rear_images or []) + (front_images or [])
+    all_images = (left_images or []) + (right_images or [])
     if not all_images:
         return None
 
@@ -216,7 +216,7 @@ def shade_treatment_days(ax, start_time, end_time):
 def get_global_times():
     max_time = None
     for hive in HIVES:
-        for cam in [hive["cam_rear"], hive["cam_front"]]:
+        for cam in [hive["cam_left"], hive["cam_right"]]:
             cam_dir = os.path.join(BASE_DIR, cam)
             png_files = sorted(glob.glob(os.path.join(cam_dir, f"{cam}_*.png")))
             if png_files:
@@ -260,28 +260,28 @@ def draw_plot(fig, axes, save_path):
         ax2.set_ylabel("Tagged unique IDs (rolling 24h)", fontsize=10, color="coral")
         ax2.tick_params(axis="y", labelcolor="coral", labelsize=10)
 
-        rear_data  = load_cam_data(hive["cam_rear"],  end_time, start_time)
-        front_data = load_cam_data(hive["cam_front"], end_time, start_time)
+        left_data  = load_cam_data(hive["cam_left"],  end_time, start_time)
+        right_data = load_cam_data(hive["cam_right"], end_time, start_time)
 
-        rear_images  = rear_data[1]  if rear_data  is not None else None
-        front_images = front_data[1] if front_data is not None else None
+        left_images  = left_data[1]  if left_data  is not None else None
+        right_images = right_data[1] if right_data is not None else None
 
-        if rear_data is None and front_data is None:
+        if left_data is None and right_data is None:
             ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
                     ha="center", va="center", color="gray", fontsize=13)
             ax2.set_yticks([])
         else:
-            if rear_data is not None:
-                smooth_u_r, _ = rear_data
-                ax.plot(smooth_u_r.index, smooth_u_r.values, lw=2.0, color=COLORS["untagged_rear"], zorder=3, label="Untagged (rear)")
+            if left_data is not None:
+                smooth_u_l, _ = left_data
+                ax.plot(smooth_u_l.index, smooth_u_l.values, lw=2.0, color=COLORS["untagged_left"], zorder=3, label="Untagged (left)")
 
-            if front_data is not None:
-                smooth_u_f, _ = front_data
-                ax.plot(smooth_u_f.index, smooth_u_f.values, lw=2.0, color=COLORS["untagged_front"], zorder=3, label="Untagged (front)")
+            if right_data is not None:
+                smooth_u_r, _ = right_data
+                ax.plot(smooth_u_r.index, smooth_u_r.values, lw=2.0, color=COLORS["untagged_right"], zorder=3, label="Untagged (right)")
 
-            rolling_union = compute_union_rolling(rear_images, front_images)
+            rolling_union = compute_union_rolling(left_images, right_images)
             if rolling_union is not None:
-                ax2.plot(rolling_union.index, rolling_union.values, lw=2.0, color=COLORS["cumul_rear"], zorder=3, label="Tagged unique IDs")
+                ax2.plot(rolling_union.index, rolling_union.values, lw=2.0, color=COLORS["cumul_left"], zorder=3, label="Tagged unique IDs")
 
             ax.set_ylim(bottom=0)
             ax2.set_ylim(bottom=0)
