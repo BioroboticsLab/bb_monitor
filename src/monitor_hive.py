@@ -16,7 +16,8 @@ BASE_DIR             = "/mnt/trove/beesbook2026/single_video_frames"
 WINDOW_DAYS          = 7
 TREATMENT_DAYS       = {1, 2}    # tue=1, wed=2
 BIN_MIN              = 15        # 15-min bins, one image per bin
-ROLL_WIN             = 96        # rolling window over 96 bins = 24 hours
+ROLL_WIN_UNTAGGED    = 24        # rolling mean over 24 bins = 6 hours
+ROLL_WIN_TAGGED      = 96        # rolling window over 96 bins = 24 hours
 MIN_SNAPSHOTS        = 3         # ID must appear in >= 3 bins within 24h to be counted
 CACHE_DIR            = "/home/beesbook/bb_monitor/cache"
 
@@ -166,7 +167,7 @@ def load_cam_data(cam, end_time, start_time):
     # untagged: mean count per bin, smoothed
     u_series = pd.Series({img["clip_time"]: img["untagged_count"] for img in updated_images})
     raw_u    = u_series.resample(freq).mean()
-    smooth_u = raw_u.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
+    smooth_u = raw_u.rolling(window=ROLL_WIN_UNTAGGED, center=True, min_periods=1).mean()
 
     return smooth_u, updated_images
 
@@ -187,7 +188,7 @@ def compute_union_rolling(left_images, right_images):
     )
 
     # for each bin, count IDs seen >= MIN_SNAPSHOTS times in the preceding rolling window
-    window    = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN)
+    window    = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN_TAGGED)
     bins_list = list(bins.items())
     rolling   = {}
     for i, (ts, _) in enumerate(bins_list):
@@ -206,7 +207,7 @@ def compute_union_rolling(left_images, right_images):
     # forward fill through gaps and for one full rolling window after the gap ends
     # so the count stays stable until the window is refilled with real data
     gap_threshold = pd.Timedelta(minutes=BIN_MIN * 2)
-    recovery      = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN)
+    recovery      = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN_TAGGED)
     image_times   = sorted(set(img["clip_time"] for img in all_images))
     for i in range(len(image_times) - 1):
         t0, t1 = image_times[i], image_times[i + 1]
