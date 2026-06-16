@@ -16,7 +16,7 @@ BASE_DIR             = "/mnt/trove/beesbook2026/single_video_frames"
 WINDOW_DAYS          = 7
 TREATMENT_DAYS       = {1, 2}    # tue=1, wed=2
 BIN_MIN              = 15        # 15-min bins, one image per bin
-ROLL_WIN             = 24        # rolling mean over 24 bins = 6 hours
+ROLL_WIN             = 96        # rolling window over 96 bins = 24 hours
 MIN_SNAPSHOTS        = 3         # ID must appear in >= 3 bins within 24h to be counted
 CACHE_DIR            = "/home/beesbook/bb_monitor/cache"
 
@@ -165,7 +165,7 @@ def load_cam_data(cam, end_time, start_time):
 
     # untagged: mean count per bin, smoothed
     u_series = pd.Series({img["clip_time"]: img["untagged_count"] for img in updated_images})
-    raw_u    = u_series.resample(freq).mean().fillna(0)
+    raw_u    = u_series.resample(freq).mean()
     smooth_u = raw_u.rolling(window=ROLL_WIN, center=True, min_periods=1).mean()
 
     return smooth_u, updated_images
@@ -177,7 +177,7 @@ def compute_union_rolling(left_images, right_images):
     if not all_images:
         return None
 
-    freq     = f"{BIN_MIN}min"
+    freq      = f"{BIN_MIN}min"
     id_series = pd.Series(
         [img["tagged_ids"] for img in all_images],
         index=[img["clip_time"] for img in all_images],
@@ -186,10 +186,10 @@ def compute_union_rolling(left_images, right_images):
         lambda x: set().union(*x) if len(x) > 0 else set()
     )
 
-    # for each bin, count IDs seen >= MIN_SNAPSHOTS times in the preceding 24h
-    window     = pd.Timedelta(hours=24)
-    bins_list  = list(bins.items())
-    rolling    = {}
+    # for each bin, count IDs seen >= MIN_SNAPSHOTS times in the preceding rolling window
+    window    = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN)
+    bins_list = list(bins.items())
+    rolling   = {}
     for i, (ts, _) in enumerate(bins_list):
         window_start = ts - window
         id_counts    = defaultdict(int)
@@ -201,7 +201,25 @@ def compute_union_rolling(left_images, right_images):
                 id_counts[bee_id] += 1
         rolling[ts] = sum(1 for c in id_counts.values() if c >= MIN_SNAPSHOTS)
 
-    return pd.Series(rolling)
+    result = pd.Series(rolling)
+
+    # forward fill through gaps and for one full rolling window after the gap ends
+    # so the count stays stable until the window is refilled with real data
+    gap_threshold = pd.Timedelta(minutes=BIN_MIN * 2)
+    recovery      = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN)
+    image_times   = sorted(set(img["clip_time"] for img in all_images))
+    for i in range(len(image_times) - 1):
+        t0, t1 = image_times[i], image_times[i + 1]
+        if t1 - t0 > gap_threshold:
+            before_gap = result[result.index <= t0]
+            if before_gap.empty:
+                continue
+            last_count   = before_gap.iloc[-1]
+            recovery_end = t1 + recovery
+            in_fill      = (result.index > t0) & (result.index < recovery_end)
+            result.loc[in_fill] = last_count
+
+    return result
 
 
 def shade_treatment_days(ax, start_time, end_time):
