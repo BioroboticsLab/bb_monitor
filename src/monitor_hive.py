@@ -80,6 +80,9 @@ def detect_bees(image_path):
     except Exception:
         return None
 
+    if video_dataframe is None:
+        return None
+
     df = video_dataframe
     df = df[df["localizerSaliency"] >= 0.5]
 

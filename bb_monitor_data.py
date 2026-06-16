@@ -52,6 +52,8 @@ def main():
             print(f"Next update in {UPDATE_INTERVAL_SECONDS // 60} minutes")
             plt.pause(UPDATE_INTERVAL_SECONDS)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"Error in data monitor loop: {e}")
             mon.send_message(config, f"Error in data monitor loop: {e}")
             plt.pause(60)  # wait a minute before retrying
