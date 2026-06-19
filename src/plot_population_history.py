@@ -204,9 +204,11 @@ def compute_union_rolling(left_images, right_images):
 
     result = pd.Series(rolling)
 
-    # forward fill through gaps and recovery window so missing data
-    # does not show as a population drop
-    gap_threshold = pd.Timedelta(minutes=BIN_MIN * 2)
+    # only forward fill for large gaps (> 6h) — the 24h rolling window naturally
+    # bridges small gaps without showing a visible dip, so no fill is needed there.
+    # recovery ends at t0 + 24h, not t1 + 24h, because pre-gap data ages out of
+    # the window 24h after the last pre-gap image (t0), not after recording resumes (t1).
+    gap_threshold = pd.Timedelta(hours=6)
     recovery      = pd.Timedelta(minutes=BIN_MIN * ROLL_WIN_TAGGED)
     image_times   = sorted(set(img["clip_time"] for img in all_images))
     for i in range(len(image_times) - 1):
@@ -216,7 +218,7 @@ def compute_union_rolling(left_images, right_images):
             if before_gap.empty:
                 continue
             last_count   = before_gap.iloc[-1]
-            recovery_end = t1 + recovery
+            recovery_end = t0 + recovery
             in_fill      = (result.index > t0) & (result.index < recovery_end)
             result.loc[in_fill] = last_count
 
