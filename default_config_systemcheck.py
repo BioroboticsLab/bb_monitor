@@ -66,6 +66,18 @@ systemcheck_process_hosts = [
     #  "match_substring": "rpi_imgcapture",     "min_count": 1},
 ]
 
+# Transfer-backlog hosts: SSH in and count the video files bb_imgacquisition has
+# written under <directory>/<cam>/ but the transfer process hasn't moved off the
+# box yet. Normally near-zero; a growing total means the transfer is broken. Warn
+# when the host's TOTAL file count exceeds num_files_to_warn (default 60).
+# "directory" may use a leading ~/ for the SSH user's home; set "command" to override
+# the auto-built count command (it must print an integer). SSH keys must allow
+# passwordless login, as for systemcheck_process_hosts.
+systemcheck_transfer_hosts = [
+    # {"hostname": "cirrus", "ssh_user": "beesbook",
+    #  "directory": "bb2026/bb_imgacquisition/data/out", "num_files_to_warn": 60},
+]
+
 # Optional overrides; the script has sensible defaults if these are absent.
 ping_timeout_seconds = 2
 ssh_timeout_seconds  = 30

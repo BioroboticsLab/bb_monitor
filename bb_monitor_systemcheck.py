@@ -188,6 +188,29 @@ def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=
     return True, None
 
 
+def check_remote_file_count(host, list_command, max_files, ssh_timeout=30, ssh_target=None):
+    """Run list_command on the remote host; it must print an integer file count
+    (e.g. `find <dir>/ -mindepth 2 -maxdepth 2 -type f 2>/dev/null | wc -l`). Warn
+    when count > max_files — for bb_imgacquisition's out/ dir a growing count means
+    the file transfer is backing up. Return (ok, msg).
+    """
+    target = ssh_target if ssh_target is not None else host
+    proc, err = _ssh_run(target, list_command, ssh_timeout)
+    if proc is None:
+        return False, f"{host}: {err}"
+    out = proc.stdout.decode(errors="replace").strip()
+    stderr = proc.stderr.decode(errors="replace").strip()
+    if _ssh_failed(proc, out):
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
+    try:
+        count = int(out.split()[0])
+    except (IndexError, ValueError):
+        return False, f"{host}: file-count unexpected output: {out!r}"
+    if count > max_files:
+        return False, f"{host}: {count} files awaiting transfer (warn >{max_files})"
+    return True, None
+
+
 # ---------- bundled per-host check sets ----------
 
 # Defaults applied to each camera entry; per-entry keys override.
@@ -289,6 +312,24 @@ def _templogger_checks(entry, ping_timeout, ssh_timeout):
     return issues
 
 
+def _transfer_checks(entry, ping_timeout, ssh_timeout):
+    """Count files awaiting transfer under the host's bb_imgacquisition out/ dir.
+    No ping pre-check (these are wired servers, like systemcheck_process_hosts);
+    ping_timeout is accepted only for signature symmetry with the other runners.
+    """
+    host = entry["hostname"]
+    ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
+    max_files = entry.get("num_files_to_warn", 60)
+    command = entry.get("command")
+    if command is None:
+        directory = entry["directory"].rstrip("/")
+        command = f"find {directory}/ -mindepth 2 -maxdepth 2 -type f 2>/dev/null | wc -l"
+    ok, msg = check_remote_file_count(
+        host, command, max_files, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
+    )
+    return [] if ok else [msg]
+
+
 # ---------- top-level run ----------
 
 def run_checks():
@@ -317,6 +358,9 @@ def run_checks():
 
     for entry in getattr(config, "systemcheck_temploggers", []):
         issues.extend(_templogger_checks(entry, ping_timeout, ssh_timeout))
+
+    for entry in getattr(config, "systemcheck_transfer_hosts", []):
+        issues.extend(_transfer_checks(entry, ping_timeout, ssh_timeout))
 
     return issues
 
