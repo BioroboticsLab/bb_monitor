@@ -103,10 +103,16 @@ echo "  (the cameras should route over the WiFi interface while the default rout
 echo "   stays on Ethernet; nothing below changes routing)"
 echo
 
-echo "=== 8. Suggested /etc/hosts lines (bypass mDNS entirely) ==="
-echo "  Static entries make ping AND ssh stop depending on avahi + multicast."
-echo "  They do not touch routing: the kernel still picks the interface by subnet."
-echo "  Reserve the leases on the router so the IPs cannot move."
+echo "=== 8. LAST RESORT: static /etc/hosts lines ==="
+echo "  Try section 6 (power_save off) FIRST and re-measure. Only fall back to this"
+echo "  if lookups still stall, and know the trade-off: these entries go stale if a"
+echo "  Pi reboots onto a different DHCP lease, and you would have to reserve every"
+echo "  lease on the router to keep them true."
+echo
+echo "  Note a caching resolver does NOT fix stalls: RFC 6762 s10 sets a 120s TTL on"
+echo "  mDNS host records, and this check runs every 600s, so any compliant cache is"
+echo "  cold every single time. Only a stale-serving override (this) skips the lookup."
+echo
 for h in "${HOSTS[@]}"; do
   ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1; exit}')
   [ -n "$ip" ] && printf "    %-16s %s %s\n" "$ip" "$h" "${h%%.local}"

@@ -153,9 +153,40 @@ awake and hides exactly the stall you are hunting.
 
 A stalled mDNS lookup on WiFi usually means **power saving**. mDNS is multicast, and
 a client in power save only wakes for multicast at DTIM beacons, so a link that idles
-between checks starts every check cold. `sudo iw dev <dev> set power_save off`, and
-add static `/etc/hosts` entries to take multicast out of the path for `ssh` as well
-as `ping`. Neither changes routing.
+between checks starts every check cold. Fix it with
+`sudo iw dev <dev> set power_save off` (persist via NetworkManager
+`wifi.powersave = 2`); this does not touch routing.
+
+### Address cache
+
+A caching *resolver* cannot help here: [RFC 6762 §10](https://www.rfc-editor.org/rfc/rfc6762.html#section-10)
+gives mDNS host records a 120s TTL while this loop checks every 600s, so any
+compliant cache has expired by the time the next check runs. It would be cold every
+single time.
+
+So the monitor keeps its own. Each hostname's IPv4 address is remembered **in memory**
+(never on disk — a stale entry outliving the process is the `/etc/hosts` failure
+mode), and both `ping` and `ssh` use it, so a healthy check performs no name lookup
+at all. Every add and drop is printed, so `tmux attach` shows exactly what the
+monitor believes each camera's address to be:
+
+```
+[resolve] feedercama.local -> 192.168.178.52
+[resolve] dropped feedercama.local (was 192.168.178.52); will re-resolve by name
+```
+
+It is never trusted for long, so a Pi rebooting onto a new DHCP lease self-heals with
+no reserved leases and nothing to edit:
+
+- the **last ping attempt of every check goes by name**, so a moved lease is picked up
+  within the same tick;
+- an address that stops answering, or that an ssh transport failure rejects, is
+  dropped and re-resolved on the next check;
+- ssh connects to the IP but passes `-o HostKeyAlias=<hostname>`, so `known_hosts`
+  still matches — and a *recycled* lease now pointing at a different machine fails
+  loudly on a host-key mismatch rather than silently monitoring the wrong box.
+
+Set `systemcheck_cache_addresses = False` to disable and resolve on every check.
 
 Retries are spaced so the attempts outlast a hiccup on the monitor's own link rather
 than all landing inside it: `(ping_attempts - 1) * ping_retry_delay_seconds`, 10s by

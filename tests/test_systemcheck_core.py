@@ -14,12 +14,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.systemcheck_core import (  # noqa: E402
     MONITOR_HOST,
     Finding,
+    HostAddresses,
     PingSettings,
     clock_findings,
     clock_skew,
     collapse_unreachable,
     confirm,
     parse_heartbeat,
+    parse_ping_address,
+    ping_targets,
 )
 
 
@@ -211,15 +214,124 @@ def test_worst_case_bounds_the_time_spent_on_one_unreachable_host():
     assert p.worst_case_seconds() == 3 * (2 + 3) + 2 * 5
 
 
+# ---------- parse_ping_address() ----------
+
+def test_parses_the_address_iputils_prints():
+    line = "PING feedercama.local (192.168.178.52) 56(84) bytes of data."
+    assert parse_ping_address(line) == "192.168.178.52"
+
+
+def test_parses_the_address_macos_prints():
+    line = "PING feedercama.local (192.168.178.52): 56 data bytes"
+    assert parse_ping_address(line) == "192.168.178.52"
+
+
+def test_the_byte_counts_are_not_mistaken_for_an_address():
+    """`56(84)` sits in parentheses too; four dotted octets are required."""
+    assert parse_ping_address("PING host (56(84)) bytes") is None
+
+
+def test_an_ipv6_ping_yields_no_ipv4_address():
+    assert parse_ping_address("PING6(56=40+8+8 bytes) fe80::1 --> fe80::2") is None
+
+
+def test_an_out_of_range_octet_is_rejected():
+    assert parse_ping_address("PING x (999.1.1.1) 56 bytes") is None
+
+
+@pytest.mark.parametrize("stdout", ["", None, "no address here"])
+def test_no_address_to_parse(stdout):
+    assert parse_ping_address(stdout) is None
+
+
+# ---------- ping_targets() ----------
+
+def test_without_a_cached_address_every_attempt_uses_the_name():
+    assert ping_targets("cam.local", None, 3) == ["cam.local"] * 3
+
+
+def test_with_a_cached_address_only_the_last_attempt_pays_for_dns():
+    assert ping_targets("cam.local", "10.0.0.5", 3) == ["10.0.0.5", "10.0.0.5", "cam.local"]
+
+
+def test_the_final_attempt_by_name_finds_a_moved_dhcp_lease_in_the_same_tick():
+    targets = ping_targets("cam.local", "10.0.0.5", 2)
+    assert targets[-1] == "cam.local"
+    assert targets[0] == "10.0.0.5"
+
+
+def test_a_single_attempt_still_gets_a_name_fallback():
+    """Otherwise a stale address could never be corrected within a tick."""
+    assert ping_targets("cam.local", "10.0.0.5", 1) == ["10.0.0.5", "cam.local"]
+
+
+def test_attempts_are_clamped_to_at_least_one():
+    assert ping_targets("cam.local", None, 0) == ["cam.local"]
+
+
+# ---------- HostAddresses ----------
+
+def test_an_address_is_remembered_and_returned():
+    addresses = HostAddresses()
+    addresses.remember("cam.local", "10.0.0.5")
+    assert addresses.get("cam.local") == "10.0.0.5"
+
+
+def test_forgetting_an_address_returns_it_and_clears_it():
+    addresses = HostAddresses()
+    addresses.remember("cam.local", "10.0.0.5")
+    assert addresses.forget("cam.local") == "10.0.0.5"
+    assert addresses.get("cam.local") is None
+
+
+def test_forgetting_an_unknown_host_is_harmless():
+    assert HostAddresses().forget("nobody.local") is None
+
+
+def test_a_disabled_cache_stores_nothing():
+    addresses = HostAddresses(enabled=False)
+    addresses.remember("cam.local", "10.0.0.5")
+    assert addresses.get("cam.local") is None
+
+
+def test_a_disabled_cache_answers_nothing_even_if_it_holds_an_address():
+    """Turning the knob off must take effect immediately, not once the entries age
+    out — that is the whole point of having a kill switch."""
+    addresses = HostAddresses()
+    addresses.remember("cam.local", "10.0.0.5")
+    addresses.enabled = False
+    assert addresses.get("cam.local") is None
+
+
+def test_every_change_is_logged_so_the_cache_is_never_a_mystery():
+    lines = []
+    addresses = HostAddresses(log=lines.append)
+    addresses.remember("cam.local", "10.0.0.5")
+    addresses.remember("cam.local", "10.0.0.5")     # unchanged: no new noise
+    addresses.remember("cam.local", "10.0.0.9")     # moved lease
+    addresses.forget("cam.local")
+    assert len(lines) == 3
+    assert "cam.local -> 10.0.0.5" in lines[0]
+    assert "cam.local -> 10.0.0.9" in lines[1]
+    assert "dropped cam.local (was 10.0.0.9)" in lines[2]
+
+
+def test_remembering_nothing_is_a_no_op():
+    addresses = HostAddresses()
+    addresses.remember("cam.local", None)
+    assert addresses.get("cam.local") is None
+
+
 # ---------- collapse_unreachable() ----------
 
 def unreachable(host, reason="no reply within 2s"):
-    return Finding(host, "ping", f"Cannot reach {host} ({reason})")
+    return Finding(host, "ping", f"Cannot reach {host} ({reason})", reason=reason)
 
 
 def stalled(host, reason="ping did not return within 7s (name resolution stalled?)"):
     """A lookup that stalled or failed: monitor-side by construction."""
-    return Finding(host, "ping", f"Cannot reach {host} ({reason})", monitor_side=True)
+    return Finding(host, "ping", f"Cannot reach {host} ({reason})",
+                   monitor_side=True, reason=reason)
 
 
 def test_a_whole_fleet_unreachable_blames_the_monitor_host():
@@ -275,6 +387,17 @@ def test_the_collapsed_message_carries_the_underlying_reason():
          unreachable("b.local", "Temporary failure in name resolution")],
         hosts_pinged=2)
     assert "Temporary failure in name resolution" in findings[0].message
+
+
+def test_a_reason_containing_parentheses_survives_the_collapse():
+    """Regression: the reason used to be recovered by slicing the rendered message
+    at its first "(" and rstripping ")", which ate the closing paren of reasons that
+    contain their own — the alert read "...(name resolution stalled?" with no close."""
+    reason = "ping did not return within 7s (name resolution stalled?)"
+    findings = collapse_unreachable([stalled("a.local", reason), stalled("b.local", reason)],
+                                    hosts_pinged=2)
+    assert findings[0].message.endswith(reason)
+    assert findings[0].message.count("(") == findings[0].message.count(")")
 
 
 def test_one_dead_camera_among_many_is_still_blamed_on_that_camera():

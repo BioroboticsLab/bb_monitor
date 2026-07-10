@@ -87,6 +87,15 @@ def _fake_ping(reachable, monitor_side=False):
 FAST = sc.PingSettings(timeout_seconds=2, attempts=1, retry_delay_seconds=0)
 
 
+@pytest.fixture(autouse=True)
+def _empty_address_cache():
+    """The address cache lives for the life of the process; don't let it leak
+    between tests."""
+    sc._addresses.clear()
+    yield
+    sc._addresses.clear()
+
+
 @pytest.fixture
 def pi(monkeypatch):
     fake = FakePi()
@@ -365,6 +374,147 @@ def test_ping_gives_resolution_headroom_beyond_the_icmp_timeout(monkeypatch):
     assert seen["timeout"] > 2
 
 
+# ---------- the address cache in the hot path ----------
+
+def _ping_stub(monkeypatch, handler):
+    """Replace subprocess.run with `handler(target) -> (rc, stdout)`."""
+    calls = []
+
+    def fake(argv, **kw):
+        target = argv[-1]
+        calls.append(target)
+        rc, stdout = handler(target)
+        return subprocess.CompletedProcess(argv, rc, stdout.encode(), b"")
+
+    monkeypatch.setattr(sc.subprocess, "run", fake)
+    return calls
+
+
+def test_a_cached_address_is_pinged_directly_and_no_name_is_resolved(monkeypatch):
+    """The whole point: no mDNS lookup in the per-check hot path."""
+    calls = _ping_stub(monkeypatch, lambda t: (0, f"PING {t} ({t}) 56 bytes"))
+    addresses = sc.HostAddresses()
+    addresses.remember("feedercama.local", "192.168.178.52")
+
+    assert sc.check_ping("feedercama.local", FAST, addresses).ok is True
+    assert calls == ["192.168.178.52"], "the hostname must never be looked up"
+
+
+def test_the_address_ping_resolved_is_remembered(monkeypatch):
+    _ping_stub(monkeypatch,
+               lambda t: (0, "PING feedercama.local (192.168.178.52) 56(84) bytes of data."))
+    addresses = sc.HostAddresses()
+    sc.check_ping("feedercama.local", FAST, addresses)
+    assert addresses.get("feedercama.local") == "192.168.178.52"
+
+
+def test_a_moved_dhcp_lease_is_picked_up_within_the_same_tick(monkeypatch):
+    """A Pi reboots onto a new lease. The cached address goes quiet, the final
+    attempt-by-name finds it again, and the cache corrects itself — no /etc/hosts to
+    edit, no reserved lease needed."""
+    def handler(target):
+        if target == "192.168.178.52":
+            return 1, ""                       # old lease: silent
+        return 0, "PING feedercama.local (192.168.178.99) 56(84) bytes of data."
+
+    calls = _ping_stub(monkeypatch, handler)
+    addresses = sc.HostAddresses()
+    addresses.remember("feedercama.local", "192.168.178.52")
+
+    result = sc.check_ping("feedercama.local",
+                           FAST._replace(attempts=2, retry_delay_seconds=0), addresses)
+    assert result.ok is True
+    assert calls == ["192.168.178.52", "feedercama.local"]
+    assert addresses.get("feedercama.local") == "192.168.178.99"
+
+
+def test_a_host_that_stays_unreachable_drops_its_cached_address(monkeypatch):
+    """So the next tick starts from a fresh lookup rather than a wrong address."""
+    _ping_stub(monkeypatch, lambda t: (1, ""))
+    addresses = sc.HostAddresses()
+    addresses.remember("feedercama.local", "192.168.178.52")
+
+    assert sc.check_ping("feedercama.local", FAST._replace(retry_delay_seconds=0),
+                         addresses).ok is False
+    assert addresses.get("feedercama.local") is None
+
+
+def test_a_disabled_cache_resolves_by_name_every_time(monkeypatch):
+    calls = _ping_stub(monkeypatch, lambda t: (0, f"PING x (192.168.178.52) 56 bytes"))
+    addresses = sc.HostAddresses(enabled=False)
+    sc.check_ping("feedercama.local", FAST, addresses)
+    sc.check_ping("feedercama.local", FAST, addresses)
+    assert calls == ["feedercama.local", "feedercama.local"]
+
+
+# ---------- ssh over the cached address ----------
+
+def _capture_argv(monkeypatch, returncode=0):
+    seen = {}
+
+    def fake(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, returncode, b"ok", b"")
+
+    monkeypatch.setattr(sc.subprocess, "run", fake)
+    return seen
+
+def test_ssh_connects_to_the_ip_but_checks_the_host_key_under_the_name(monkeypatch):
+    """Otherwise known_hosts would not match and BatchMode ssh would refuse. It also
+    means a recycled lease fails loudly on a host-key mismatch."""
+    seen = _capture_argv(monkeypatch)
+    sc._ssh_run(sc.SshTarget("pi@192.168.178.52", "feedercama.local"), "true", 5)
+    assert "pi@192.168.178.52" in seen["argv"]
+    assert "HostKeyAlias=feedercama.local" in seen["argv"]
+
+
+def test_ssh_by_name_passes_no_host_key_alias(monkeypatch):
+    seen = _capture_argv(monkeypatch)
+    sc._ssh_run("pi@feedercama.local", "true", 5)
+    assert not any("HostKeyAlias" in str(a) for a in seen["argv"])
+
+
+def test_an_ssh_transport_failure_drops_the_cached_address(monkeypatch):
+    """exit 255 against a cached IP: wrong host, moved lease, bad key. Re-resolve."""
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 255, b"", b"boom"))
+    sc._addresses.remember("feedercama.local", "192.168.178.52")
+    sc._ssh_run(sc.SshTarget("pi@192.168.178.52", "feedercama.local"), "true", 5)
+    assert sc._addresses.get("feedercama.local") is None
+
+
+def test_an_ssh_timeout_drops_the_cached_address(monkeypatch):
+    def hang(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+    monkeypatch.setattr(sc.subprocess, "run", hang)
+    sc._addresses.remember("feedercama.local", "192.168.178.52")
+    sc._ssh_run(sc.SshTarget("pi@192.168.178.52", "feedercama.local"), "true", 5)
+    assert sc._addresses.get("feedercama.local") is None
+
+
+def test_a_domain_level_ssh_failure_keeps_the_cached_address(monkeypatch):
+    """`systemctl is-active` returning 3 says nothing about the address."""
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 3, b"inactive", b""))
+    sc._addresses.remember("feedercama.local", "192.168.178.52")
+    sc._ssh_run(sc.SshTarget("pi@192.168.178.52", "feedercama.local"), "true", 5)
+    assert sc._addresses.get("feedercama.local") == "192.168.178.52"
+
+
+def test_ssh_target_prefers_the_cached_address():
+    addresses = sc.HostAddresses()
+    assert sc._ssh_target_for("cam.local", "pi", addresses) == sc.SshTarget("pi@cam.local", None)
+    addresses.remember("cam.local", "10.0.0.5")
+    assert sc._ssh_target_for("cam.local", "pi", addresses) == sc.SshTarget("pi@10.0.0.5", "cam.local")
+
+
+def test_ssh_target_without_a_user_still_uses_the_cache():
+    addresses = sc.HostAddresses()
+    addresses.remember("cirrus", "10.0.0.9")
+    assert sc._ssh_target_for("cirrus", None, addresses) == sc.SshTarget("10.0.0.9", "cirrus")
+
+
 # ---------- the heartbeat probe command itself ----------
 #
 # The FakePi answers a canned reply to any command mentioning the heartbeat path, so
@@ -539,7 +689,8 @@ def fleet(monkeypatch):
     pis = {"exitcama.local": FakePi(), "exitcamb.local": FakePi()}
 
     def ssh(target, cmd, timeout):
-        return pis[target.split("@")[-1]].ssh(target, cmd, timeout)
+        destination = sc._as_ssh_target(target).destination
+        return pis[destination.split("@")[-1]].ssh(target, cmd, timeout)
 
     cfg = sc.config
     monkeypatch.setattr(cfg, "systemcheck_cameras",

@@ -34,18 +34,30 @@ import src.mon as mon
 from src.systemcheck_core import (
     RESOLVE_GRACE_SECONDS,
     Finding,
+    HostAddresses,
     PingResult,
     PingSettings,
+    SshTarget,
     clock_findings,
     clock_skew,
     collapse_unreachable,
     confirm,
     parse_heartbeat,
+    parse_ping_address,
+    ping_targets,
 )
 
 config = mon.get_config(
     default_module="default_config_systemcheck",
     user_module="user_config_systemcheck",
+)
+
+# Hostname -> IPv4, held for the life of the process. See HostAddresses for why a
+# resolver cache cannot do this job. Every add and drop is logged, so `tmux attach`
+# shows exactly what the monitor believes each camera's address to be.
+_addresses = HostAddresses(
+    enabled=getattr(config, "systemcheck_cache_addresses", True),
+    log=lambda message: print(message, flush=True),
 )
 
 
@@ -63,11 +75,10 @@ def _ping_args(timeout_seconds):
     return ["-W", str(max(1, int(timeout_seconds)))]
 
 
-def check_ping(host, ping=None):
-    """ICMP-ping `host`. Return a PingResult.
+def _ping_once(target, ping, deadline):
+    """One `ping -c 1` at `target` (a hostname or an IP). Return a PingResult.
 
-    Reports *why* it failed rather than collapsing everything into "Cannot reach",
-    and classifies whose fault it is. iputils gives us enough to tell them apart:
+    Classifies whose fault a failure is. iputils gives us enough to tell them apart:
 
       exit 1, nothing on stderr  the host did not answer          -> host-side
       exit 2, "Name or service not known" / "Network is unreachable"
@@ -76,40 +87,64 @@ def check_ping(host, ping=None):
                                  sleeping WiFi link)              -> monitor-side
 
     Name resolution runs here, so a lookup that stalls or fails says nothing about
-    the camera. Retries are spaced by `retry_delay_seconds` so the attempts outlast
-    a hiccup on this machine's link rather than all landing inside it.
+    the camera.
+    """
+    try:
+        proc = subprocess.run(
+            ["ping", "-c", "1"] + _ping_args(ping.timeout_seconds) + [target],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=deadline,
+        )
+    except subprocess.TimeoutExpired:
+        return PingResult(
+            False,
+            f"ping did not return within {deadline}s (name resolution stalled?)",
+            monitor_side=True,
+        )
+    except FileNotFoundError:
+        return PingResult(False, "ping binary not found", monitor_side=True)
+
+    stdout = proc.stdout.decode(errors="replace")
+    if proc.returncode == 0:
+        return PingResult(True, address=parse_ping_address(stdout))
+    stderr = proc.stderr.decode(errors="replace").strip().splitlines()
+    # A silent exit 1 is the only outcome that means "the remote host is quiet".
+    # Everything else — anything ping saw fit to complain about, any other exit
+    # code — happened before a packet ever left this machine.
+    monitor_side = bool(stderr) or proc.returncode != 1
+    reason = stderr[-1] if stderr else f"no reply within {ping.timeout_seconds}s"
+    return PingResult(False, reason, monitor_side)
+
+
+def check_ping(host, ping=None, addresses=None):
+    """ICMP-ping `host`, preferring its cached address. Return a PingResult.
+
+    The cache is what keeps mDNS out of the hot path (see HostAddresses). The last
+    attempt always goes by name, so a Pi on a new DHCP lease is found in the same
+    tick; and if every attempt fails, the cached address is dropped so the next tick
+    starts from a fresh lookup.
+
+    Retries are spaced by `retry_delay_seconds` so the attempts outlast a hiccup on
+    this machine's link rather than all landing inside it.
     """
     ping = ping or PingSettings()
+    addresses = _addresses if addresses is None else addresses
+    cached = addresses.get(host)
     deadline = ping.timeout_seconds + RESOLVE_GRACE_SECONDS
+
     result = PingResult(False, "not attempted")
-    for attempt in range(max(1, ping.attempts)):
+    for attempt, target in enumerate(ping_targets(host, cached, ping.attempts)):
         if attempt:
             time.sleep(ping.retry_delay_seconds)
-        try:
-            proc = subprocess.run(
-                ["ping", "-c", "1"] + _ping_args(ping.timeout_seconds) + [host],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=deadline,
-            )
-        except subprocess.TimeoutExpired:
-            result = PingResult(
-                False,
-                f"ping did not return within {deadline}s (name resolution stalled?)",
-                monitor_side=True,
-            )
-            continue
-        except FileNotFoundError:
-            return PingResult(False, "ping binary not found", monitor_side=True)
-        if proc.returncode == 0:
-            return PingResult(True)
-        stderr = proc.stderr.decode(errors="replace").strip().splitlines()
-        # A silent exit 1 is the only outcome that means "the remote host is quiet".
-        # Everything else — anything ping saw fit to complain about, any other exit
-        # code — happened before a packet ever left this machine.
-        monitor_side = bool(stderr) or proc.returncode != 1
-        reason = stderr[-1] if stderr else f"no reply within {ping.timeout_seconds}s"
-        result = PingResult(False, reason, monitor_side)
+        result = _ping_once(target, ping, deadline)
+        if result.ok:
+            # Keep whatever ping resolved: by name this is the lookup we just paid
+            # for, by IP it is the address we already had.
+            addresses.remember(host, result.address)
+            return result
+    if cached:
+        addresses.forget(host)
     return result
 
 
@@ -124,17 +159,26 @@ def _ping_settings(cfg):
     )
 
 
+def _as_ssh_target(value):
+    return value if isinstance(value, SshTarget) else SshTarget(value)
+
+
 def _ssh_run(host, remote_cmd, ssh_timeout):
     """SSH to host and run remote_cmd (a shell string). Return (proc, err_msg).
     proc is None when ssh itself failed; err_msg is non-None in that case.
+
+    `host` may be an SshTarget carrying a cached IP, which keeps mDNS out of the ssh
+    path too — ssh resolves the same names over the same link, so caching only the
+    ping would leave every other check stalling.
     """
-    ssh_cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={ssh_timeout}",
-        host,
-        remote_cmd,
-    ]
+    target = _as_ssh_target(host)
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={ssh_timeout}"]
+    if target.host_key_alias:
+        # Connecting by IP: look the host key up under the name so known_hosts still
+        # matches, and so a recycled lease fails loudly instead of silently checking
+        # the wrong machine.
+        ssh_cmd += ["-o", f"HostKeyAlias={target.host_key_alias}"]
+    ssh_cmd += [target.destination, remote_cmd]
     try:
         proc = subprocess.run(
             ssh_cmd,
@@ -142,11 +186,23 @@ def _ssh_run(host, remote_cmd, ssh_timeout):
             stderr=subprocess.PIPE,
             timeout=ssh_timeout + 5,
         )
-        return proc, None
     except subprocess.TimeoutExpired:
+        _forget_cached_address(target)
         return None, f"ssh timeout after {ssh_timeout}s"
     except FileNotFoundError:
         return None, "ssh binary not found"
+    if proc.returncode == 255:
+        # Transport failure against a cached address (wrong host, moved lease, bad
+        # host key). Drop it so the next tick resolves the name again.
+        _forget_cached_address(target)
+    return proc, None
+
+
+def _forget_cached_address(target):
+    """Only a target built from the cache carries an alias, so this is a no-op for
+    hosts we reached by name."""
+    if target.host_key_alias:
+        _addresses.forget(target.host_key_alias)
 
 
 def _ssh_failed(proc, stdout):
@@ -385,13 +441,20 @@ _EXITCAM_DEFAULTS = {
 RASPICAM_SERVICE = "raspicam.service"
 
 
-def _ssh_target_for(host, user):
-    return f"{user}@{host}" if user else host
+def _ssh_target_for(host, user, addresses=None):
+    """Prefer the cached IP, but keep the hostname for the host-key lookup."""
+    addresses = _addresses if addresses is None else addresses
+    address = addresses.get(host)
+    destination = address or host
+    if user:
+        destination = f"{user}@{destination}"
+    return SshTarget(destination, host if address else None)
 
 
 def _unreachable(host, result):
     message = f"Cannot reach {host} ({result.reason})" if result.reason else f"Cannot reach {host}"
-    return Finding(host, "ping", message, monitor_side=result.monitor_side)
+    return Finding(host, "ping", message,
+                   monitor_side=result.monitor_side, reason=result.reason)
 
 
 def _camera_checks(cam, ping, ssh_timeout, clock):

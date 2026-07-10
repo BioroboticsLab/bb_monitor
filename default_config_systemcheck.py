@@ -119,3 +119,16 @@ ping_timeout_seconds     = 2
 ping_attempts            = 3
 ping_retry_delay_seconds = 5
 ssh_timeout_seconds      = 30
+
+# Remember each hostname's IPv4 address in memory and use it for ping and ssh, so a
+# check never waits on a name lookup. A resolver cache cannot do this: mDNS host
+# records carry a 120s TTL (RFC 6762 s10) while checks run every 600s, so a compliant
+# cache is expired every time and each check pays a fresh multicast lookup — which
+# stalls over a WiFi link in power save.
+#
+# Nothing is persisted, and the cache is never trusted for long: the last ping
+# attempt of every check goes by name, an address that stops answering is dropped,
+# and ssh looks the host key up under the hostname so a recycled DHCP lease fails
+# loudly rather than silently monitoring the wrong machine. Set False to disable and
+# resolve on every check.
+systemcheck_cache_addresses = True

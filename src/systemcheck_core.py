@@ -7,6 +7,7 @@ tested without a network or a Raspberry Pi. See tests/test_systemcheck_core.py.
 
 bb_monitor_systemcheck.py does the I/O and calls into here.
 """
+import re
 import statistics
 from typing import NamedTuple, Optional
 
@@ -50,10 +51,102 @@ class PingResult(NamedTuple):
     it is a fact about the monitor, no matter which hostname was being resolved.
     Distinguishing that from "the host did not answer" is what lets N identical
     alerts collapse into the one machine actually at fault.
+
+    `address` is the IPv4 ping resolved the name to, when it printed one.
     """
     ok: bool
     reason: Optional[str] = None
     monitor_side: bool = False
+    address: Optional[str] = None
+
+
+class SshTarget(NamedTuple):
+    """Where to ssh, and under what name to look up the host key.
+
+    When `destination` is a cached IP, `host_key_alias` carries the hostname so
+    `known_hosts` still matches. That also makes a recycled DHCP lease fail loudly
+    (host key mismatch) rather than silently monitoring somebody else's machine.
+    """
+    destination: str
+    host_key_alias: Optional[str] = None
+
+
+_IPV4_IN_PARENS = re.compile(r"\((\d{1,3}(?:\.\d{1,3}){3})\)")
+
+
+def parse_ping_address(stdout):
+    """Pull the IPv4 address ping resolved a name to, out of its first line.
+
+        iputils: PING feedercama.local (192.168.178.52) 56(84) bytes of data.
+        macOS:   PING feedercama.local (192.168.178.52): 56 data bytes
+
+    Returns None when ping printed no IPv4 address (e.g. it resolved to IPv6). The
+    `56(84)` byte counts cannot match: four dotted octets are required.
+    """
+    match = _IPV4_IN_PARENS.search(stdout or "")
+    if not match:
+        return None
+    address = match.group(1)
+    if any(int(octet) > 255 for octet in address.split(".")):
+        return None
+    return address
+
+
+class HostAddresses:
+    """In-memory hostname -> IPv4 cache, so the hot path never re-resolves.
+
+    mDNS host records carry a 120s TTL (RFC 6762 s10) while this loop checks every
+    600s, so a *compliant* resolver cache is expired at every single tick and each
+    check pays a fresh multicast lookup. Over a WiFi link in power save that lookup
+    stalls for seconds. Holding the address ourselves is the only cache with a long
+    enough memory to help.
+
+    Deliberately not persisted, and deliberately not authoritative: a stale entry
+    outliving the process would be exactly the /etc/hosts failure mode this exists to
+    avoid. A Pi that reboots onto a new lease self-heals within one tick, because an
+    address that stops answering is dropped and the name is looked up again.
+    """
+
+    def __init__(self, enabled=True, log=None):
+        self.enabled = enabled
+        self._by_host = {}
+        self._log = log or (lambda message: None)
+
+    def get(self, host):
+        return self._by_host.get(host) if self.enabled else None
+
+    def remember(self, host, address):
+        if not self.enabled or not address:
+            return
+        if self._by_host.get(host) != address:
+            self._log(f"[resolve] {host} -> {address}")
+        self._by_host[host] = address
+
+    def forget(self, host):
+        address = self._by_host.pop(host, None)
+        if address:
+            self._log(f"[resolve] dropped {host} (was {address}); will re-resolve by name")
+        return address
+
+    def clear(self):
+        self._by_host.clear()
+
+    def snapshot(self):
+        return dict(self._by_host)
+
+
+def ping_targets(host, cached_address, attempts):
+    """Which address each successive ping attempt should aim at.
+
+    Spend every attempt but the last on the cached address — that is the whole point,
+    no DNS in the hot path. Make the final attempt by *name*, so a Pi that moved to a
+    new DHCP lease is found again inside the same tick rather than after a whole tick
+    of being reported unreachable.
+    """
+    attempts = max(1, attempts)
+    if not cached_address:
+        return [host] * attempts
+    return [cached_address] * max(1, attempts - 1) + [host]
 
 
 # `ping -W` bounds only the wait for an ICMP reply; name resolution happens before
@@ -77,6 +170,10 @@ class Finding(NamedTuple):
     remediable: bool = False
     ssh_target: Optional[str] = None
     monitor_side: bool = False
+    # The bare failure reason, kept alongside the rendered message. Recovering it by
+    # slicing the message is not safe: reasons contain their own parentheses, e.g.
+    # "ping did not return within 7s (name resolution stalled?)".
+    reason: Optional[str] = None
 
     @property
     def key(self):
@@ -136,8 +233,7 @@ COLLAPSE_THRESHOLD = 2
 
 
 def _reason_of(finding):
-    """Pull the parenthesised reason back out of a "Cannot reach x (why)" message."""
-    return finding.message.partition("(")[2].rstrip(")")
+    return finding.reason or ""
 
 
 def collapse_unreachable(findings, hosts_pinged):
