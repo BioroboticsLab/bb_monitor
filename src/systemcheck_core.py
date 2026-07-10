@@ -17,24 +17,22 @@ MONITOR_HOST = "__monitor__"
 class PingSettings(NamedTuple):
     """How hard to try before calling a host unreachable.
 
-    Retries are *spaced*, not back-to-back. A WiFi interface that drops off and
-    reassociates takes the monitor host's resolver and network with it for a few
-    seconds, and during that window `ping` fails **instantly** ("Temporary failure in
-    name resolution") rather than waiting out its timeout. So back-to-back retries
-    all land inside the dropout and report the whole fleet dead. What matters is the
-    wall-clock span between the first and last attempt, not the number of attempts.
-
-    Defaults span ~10s of dropout, sized against a real ~9s wlp3s0 reassociation.
+    Retries are *spaced*, not back-to-back, so that the attempts outlast a hiccup on
+    the monitor host's own link rather than all landing inside it. A misbehaving
+    mDNS lookup shows up either way: it can stall for seconds (WiFi power save delays
+    the multicast exchange) or fail instantly once the interface has gone away.
+    retry_span_seconds() assumes the instant-failure case because it is the one where
+    the timeouts contribute nothing, making it a lower bound on coverage.
     """
     timeout_seconds: float = 2
     attempts: int = 3
     retry_delay_seconds: float = 5
 
     def retry_span_seconds(self):
-        """Wall clock covered by the retries when every attempt fails instantly.
+        """Lower bound on the wall clock the retries cover.
 
-        The pessimistic case, and the one that matters: a resolution failure returns
-        immediately, so only the delays separate the attempts.
+        When every attempt fails instantly, only the delays separate them. When
+        attempts instead stall to their deadline, the real span is longer.
         """
         return max(0, self.attempts - 1) * self.retry_delay_seconds
 
@@ -42,6 +40,20 @@ class PingSettings(NamedTuple):
         """Wall clock per host when every attempt runs to its full timeout."""
         per_attempt = self.timeout_seconds + RESOLVE_GRACE_SECONDS
         return self.attempts * per_attempt + self.retry_span_seconds()
+
+
+class PingResult(NamedTuple):
+    """Outcome of pinging one host.
+
+    `monitor_side` is the load-bearing bit. Name resolution happens on *this*
+    machine, so a lookup that stalls or fails is never the remote camera's fault —
+    it is a fact about the monitor, no matter which hostname was being resolved.
+    Distinguishing that from "the host did not answer" is what lets N identical
+    alerts collapse into the one machine actually at fault.
+    """
+    ok: bool
+    reason: Optional[str] = None
+    monitor_side: bool = False
 
 
 # `ping -W` bounds only the wait for an ICMP reply; name resolution happens before
@@ -64,6 +76,7 @@ class Finding(NamedTuple):
     message: str
     remediable: bool = False
     ssh_target: Optional[str] = None
+    monitor_side: bool = False
 
     @property
     def key(self):
@@ -119,28 +132,56 @@ def _same_sign(values):
     return all(v > 0 for v in values) or all(v < 0 for v in values)
 
 
-def collapse_unreachable(findings, hosts_pinged):
-    """Replace "every device is unreachable" with one finding blaming the monitor.
+COLLAPSE_THRESHOLD = 2
 
-    Eight cameras do not drop off a network together. When nothing at all answers,
-    the one machine common to every failed check is this one — typically its WiFi
-    reassociating, which takes mDNS and ICMP down with it. Reporting that once is
-    both truer and quieter than eight identical `Cannot reach ...` lines.
+
+def _reason_of(finding):
+    """Pull the parenthesised reason back out of a "Cannot reach x (why)" message."""
+    return finding.message.partition("(")[2].rstrip(")")
+
+
+def collapse_unreachable(findings, hosts_pinged):
+    """Replace many "Cannot reach ..." lines with one finding blaming the monitor.
+
+    Two independent reasons to blame this machine:
+
+    1. Several hosts failed *monitor-side* — a name lookup that stalled or failed.
+       Resolution happens here, so it is a fact about this machine regardless of how
+       many other hosts happened to answer. This fires even when some hosts are fine,
+       which matters: a templogger running on the monitor itself always answers, and
+       would otherwise veto the collapse forever.
+
+    2. Every host we pinged is unreachable. Cameras do not leave a network together;
+       the machine they have in common is this one.
 
     Keyed on MONITOR_HOST, so the two-tick confirmation treats a fleet-wide outage as
     a single issue that must persist before anyone is told about it.
     """
     unreachable = [f for f in findings if f.kind == "ping"]
-    if hosts_pinged < 2 or len(unreachable) < hosts_pinged:
-        return findings
-    reason = unreachable[0].message.partition("(")[2].rstrip(")")
-    detail = f": {reason}" if reason else ""
-    survivors = [f for f in findings if f.kind != "ping"]
-    return survivors + [Finding(
-        MONITOR_HOST, "network",
-        f"Monitor host cannot reach any of its {hosts_pinged} devices "
-        f"— check its own network{detail}",
-    )]
+    local = [f for f in unreachable if f.monitor_side]
+
+    if len(local) >= COLLAPSE_THRESHOLD:
+        detail = _reason_of(local[0])
+        survivors = [f for f in findings if f not in local]
+        return survivors + [Finding(
+            MONITOR_HOST, "network",
+            f"Monitor host could not resolve or reach {len(local)} of its devices "
+            f"— its own network/resolver is at fault"
+            + (f": {detail}" if detail else ""),
+            monitor_side=True,
+        )]
+
+    if hosts_pinged >= COLLAPSE_THRESHOLD and len(unreachable) == hosts_pinged:
+        detail = _reason_of(unreachable[0])
+        survivors = [f for f in findings if f.kind != "ping"]
+        return survivors + [Finding(
+            MONITOR_HOST, "network",
+            f"Monitor host cannot reach any of its {hosts_pinged} devices "
+            f"— check its own network" + (f": {detail}" if detail else ""),
+            monitor_side=True,
+        )]
+
+    return findings
 
 
 def confirm(pending, found):

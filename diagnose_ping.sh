@@ -78,17 +78,35 @@ else
 fi
 echo
 
-echo "=== 6. WiFi power saving (a common cause of these drops) ==="
+echo "=== 6. WiFi power saving ==="
+# mDNS is multicast, and a WiFi client in power save only wakes for multicast at DTIM
+# beacons. Between checks the link sits idle and sleeps, so every check starts cold
+# and the first lookup stalls for seconds. An interactive ping looks fast because the
+# ssh session has already woken the link.
 for dev in $(ls /sys/class/net 2>/dev/null); do
   [ -d "/sys/class/net/$dev/wireless" ] || continue
   ps=$(iw dev "$dev" get power_save 2>/dev/null | awk '{print $NF}')
-  echo "  $dev power_save: ${ps:-unknown}   (disable with: sudo iw dev $dev set power_save off)"
+  echo "  $dev power_save: ${ps:-unknown}"
+  [ "$ps" = "on" ] && echo "    ^ likely cause of stalled lookups. Turn it off:  sudo iw dev $dev set power_save off"
 done
 echo
 
-echo "=== 7. Suggested /etc/hosts lines (bypass mDNS entirely) ==="
-echo "  Add these to /etc/hosts on this machine, and reserve the leases on the router."
-echo "  ping and ssh then stop depending on avahi being up:"
+echo "=== 7. Routing (which interface reaches the cameras?) ==="
+echo "  default route: $(ip route show default 2>/dev/null | head -1)"
+for h in "${HOSTS[@]}"; do
+  ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1; exit}')
+  [ -n "$ip" ] || continue
+  echo "  $h -> $(ip route get "$ip" 2>/dev/null | head -1)"
+  break
+done
+echo "  (the cameras should route over the WiFi interface while the default route"
+echo "   stays on Ethernet; nothing below changes routing)"
+echo
+
+echo "=== 8. Suggested /etc/hosts lines (bypass mDNS entirely) ==="
+echo "  Static entries make ping AND ssh stop depending on avahi + multicast."
+echo "  They do not touch routing: the kernel still picks the interface by subnet."
+echo "  Reserve the leases on the router so the IPs cannot move."
 for h in "${HOSTS[@]}"; do
   ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1; exit}')
   [ -n "$ip" ] && printf "    %-16s %s %s\n" "$ip" "$h" "${h%%.local}"
@@ -96,5 +114,10 @@ done
 echo
 echo "Reading this:"
 echo "  * section 2 exit=2 / section 1 unresolved  -> mDNS on THIS host, cameras are fine"
+echo "  * section 2 shows 'did not return'         -> the lookup STALLED (see section 6)"
 echo "  * section 4 OK by IP while section 2 fails -> same conclusion"
-echo "  * section 5 shows frequent drops           -> this host's WiFi is the culprit"
+echo "  * section 5 shows frequent drops           -> this host's WiFi link is unstable"
+echo
+echo "NOTE: run this from a COLD link to reproduce what the monitor sees. An ssh"
+echo "session keeps the WiFi awake, which hides the stall. Try:"
+echo "  echo 'bash $(cd "$(dirname "$0")" && pwd)/diagnose_ping.sh > /tmp/diag.txt 2>&1' | at now + 20 minutes"

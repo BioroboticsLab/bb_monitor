@@ -217,6 +217,11 @@ def unreachable(host, reason="no reply within 2s"):
     return Finding(host, "ping", f"Cannot reach {host} ({reason})")
 
 
+def stalled(host, reason="ping did not return within 7s (name resolution stalled?)"):
+    """A lookup that stalled or failed: monitor-side by construction."""
+    return Finding(host, "ping", f"Cannot reach {host} ({reason})", monitor_side=True)
+
+
 def test_a_whole_fleet_unreachable_blames_the_monitor_host():
     """Eight cameras do not drop off a network together."""
     hosts = [f"cam{i}.local" for i in range(8)]
@@ -224,6 +229,44 @@ def test_a_whole_fleet_unreachable_blames_the_monitor_host():
     assert len(findings) == 1
     assert findings[0].key == (MONITOR_HOST, "network")
     assert "cannot reach any of its 8 devices" in findings[0].message
+
+
+def test_resolver_stalls_collapse_even_when_another_host_answers():
+    """The bug seen in production: a templogger running *on the monitor* always
+    answers its own ping, so `unreachable == hosts_pinged` never held and eight
+    identical resolver-stall lines went out every tick. A stalled lookup happens on
+    this machine, so it needs no help from the other hosts to indict it."""
+    cams = [stalled(f"cam{i}.local") for i in range(8)]
+    findings = collapse_unreachable(cams, hosts_pinged=9)   # 9th host was reachable
+    assert len(findings) == 1
+    assert findings[0].key == (MONITOR_HOST, "network")
+    assert "8 of its devices" in findings[0].message
+    assert "name resolution stalled" in findings[0].message
+
+
+def test_a_resolver_stall_collapse_keeps_unrelated_findings():
+    findings = collapse_unreachable(
+        [stalled("cam0.local"), stalled("cam1.local"),
+         Finding("thria", "proc:bb_imgacquisition", "count=0, expected >=4")],
+        hosts_pinged=9)
+    assert {f.kind for f in findings} == {"network", "proc:bb_imgacquisition"}
+
+
+def test_a_genuinely_silent_host_is_not_swept_into_the_monitor_finding():
+    """Two stalled lookups plus one camera that is really down: the down camera must
+    keep its own line, or a real outage hides behind a resolver complaint."""
+    findings = collapse_unreachable(
+        [stalled("cam0.local"), stalled("cam1.local"), unreachable("cam2.local")],
+        hosts_pinged=9)
+    keys = {f.key for f in findings}
+    assert (MONITOR_HOST, "network") in keys
+    assert ("cam2.local", "ping") in keys
+
+
+def test_a_single_resolver_stall_is_not_enough_to_blame_the_monitor():
+    """One host failing to resolve may simply have been renamed or removed."""
+    findings = collapse_unreachable([stalled("cam0.local")], hosts_pinged=9)
+    assert findings[0].key == ("cam0.local", "ping")
 
 
 def test_the_collapsed_message_carries_the_underlying_reason():

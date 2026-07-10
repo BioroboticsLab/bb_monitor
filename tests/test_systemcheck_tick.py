@@ -75,10 +75,12 @@ def _proc(rc, stdout, stderr=""):
         args=[], returncode=rc, stdout=stdout.encode(), stderr=stderr.encode())
 
 
-def _fake_ping(reachable):
-    """check_ping returns (ok, reason); reason is None on success."""
+def _fake_ping(reachable, monitor_side=False):
+    """check_ping returns a PingResult."""
     def ping(host, ping_cfg=None):
-        return (True, None) if reachable(host) else (False, "no reply within 2s")
+        if reachable(host):
+            return sc.PingResult(True)
+        return sc.PingResult(False, "no reply within 2s", monitor_side)
     return ping
 
 
@@ -195,8 +197,8 @@ def test_the_ping_failure_reason_reaches_the_alert(monkeypatch, pi):
     """Without the reason, eight simultaneous 'Cannot reach' lines look like eight
     dead cameras rather than one broken resolver on the monitor host."""
     monkeypatch.setattr(sc, "check_ping",
-                        lambda host, ping_cfg=None:
-                        (False, "ping: %s: Temporary failure in name resolution" % host))
+                        lambda host, ping_cfg=None: sc.PingResult(
+                            False, "ping: %s: Temporary failure in name resolution" % host))
     sent = run_ticks(monkeypatch, pi, [unreachable, unreachable])
     assert "Cannot reach exitcamd.local" in sent[0][1]
     assert "Temporary failure in name resolution" in sent[0][1]
@@ -267,17 +269,19 @@ def test_ping_reports_name_resolution_failure_distinctly(monkeypatch):
         return subprocess.CompletedProcess(
             argv, 2, b"", b"ping: feedercama.local: Temporary failure in name resolution\n")
     monkeypatch.setattr(sc.subprocess, "run", fake_run)
-    ok, reason = sc.check_ping("feedercama.local", FAST)
-    assert ok is False
-    assert "Temporary failure in name resolution" in reason
+    result = sc.check_ping("feedercama.local", FAST)
+    assert result.ok is False
+    assert "Temporary failure in name resolution" in result.reason
+    assert result.monitor_side is True, "resolution happens on this machine"
 
 
 def test_ping_reports_a_silent_host_as_no_reply(monkeypatch):
     """No ICMP answer: iputils exits 1 and prints nothing to stderr."""
     monkeypatch.setattr(sc.subprocess, "run",
                         lambda argv, **kw: subprocess.CompletedProcess(argv, 1, b"", b""))
-    ok, reason = sc.check_ping("exitcamd.local", FAST)
-    assert (ok, reason) == (False, "no reply within 2s")
+    result = sc.check_ping("exitcamd.local", FAST)
+    assert (result.ok, result.reason) == (False, "no reply within 2s")
+    assert result.monitor_side is False, "a silent host is the host's problem"
 
 
 def test_ping_retries_before_declaring_a_host_unreachable(monkeypatch):
@@ -290,8 +294,8 @@ def test_ping_retries_before_declaring_a_host_unreachable(monkeypatch):
         return subprocess.CompletedProcess(argv, rc, b"", b"")
 
     monkeypatch.setattr(sc.subprocess, "run", flaky)
-    ok, reason = sc.check_ping("feedercama.local", FAST._replace(attempts=2))
-    assert (ok, reason) == (True, None)
+    result = sc.check_ping("feedercama.local", FAST._replace(attempts=2))
+    assert (result.ok, result.reason) == (True, None)
     assert len(calls) == 2, "must actually retry"
 
 
@@ -303,8 +307,8 @@ def test_ping_gives_up_after_the_configured_attempts(monkeypatch):
         return subprocess.CompletedProcess(argv, 1, b"", b"")
 
     monkeypatch.setattr(sc.subprocess, "run", always_down)
-    ok, _ = sc.check_ping("exitcamd.local", FAST._replace(attempts=3))
-    assert ok is False and len(calls) == 3
+    assert sc.check_ping("exitcamd.local", FAST._replace(attempts=3)).ok is False
+    assert len(calls) == 3
 
 
 def test_ping_retries_are_spaced_and_never_sleep_after_the_last_attempt(monkeypatch):
@@ -325,8 +329,29 @@ def test_ping_does_not_sleep_when_the_first_attempt_succeeds(monkeypatch):
     monkeypatch.setattr(sc.time, "sleep", sleeps.append)
     monkeypatch.setattr(sc.subprocess, "run",
                         lambda argv, **kw: subprocess.CompletedProcess(argv, 0, b"", b""))
-    ok, _ = sc.check_ping("h", sc.PingSettings(attempts=3, retry_delay_seconds=5))
-    assert ok is True and sleeps == []
+    assert sc.check_ping("h", sc.PingSettings(attempts=3, retry_delay_seconds=5)).ok is True
+    assert sleeps == []
+
+
+def test_a_stalled_ping_is_classified_as_the_monitors_fault(monkeypatch):
+    """The production symptom: `ping did not return within 7s`. Not exit 2 — ping
+    never returned at all, because the mDNS lookup stalled over a WiFi link in power
+    save. Resolution happens here, so this says nothing about the camera."""
+    def hang(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+    monkeypatch.setattr(sc.subprocess, "run", hang)
+    result = sc.check_ping("exitcamd.local", FAST)
+    assert result.ok is False
+    assert result.monitor_side is True
+    assert "did not return" in result.reason
+
+
+def test_a_network_unreachable_error_is_the_monitors_fault(monkeypatch):
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(
+                            argv, 2, b"", b"ping: connect: Network is unreachable\n"))
+    assert sc.check_ping("exitcamd.local", FAST).monitor_side is True
 
 
 def test_ping_gives_resolution_headroom_beyond_the_icmp_timeout(monkeypatch):
@@ -593,6 +618,33 @@ def test_a_fleet_wide_outage_still_needs_two_ticks(monkeypatch, fleet):
             p.reachable = True
 
     assert run_ticks(monkeypatch, list(fleet.values()), [all_down, all_up, all_up]) == []
+
+
+def test_stalled_lookups_collapse_even_though_a_local_host_still_answers(monkeypatch, fleet):
+    """Reproduces the 12:34 alert: both cameras' lookups stalled, but a templogger
+    running on the monitor itself answered its own ping. The old "every pinged host
+    must fail" rule was vetoed by that one reachable host, so eight identical lines
+    went out. A stalled lookup is monitor-side on its own evidence."""
+    monkeypatch.setattr(sc.config, "systemcheck_temploggers",
+                        [{"hostname": "thria", "csv_glob": "/tmp/t_*.csv"}], raising=False)
+
+    def stall_cameras(_):
+        for p in fleet.values():
+            p.reachable = False
+
+    # cameras stall (monitor-side); "thria" resolves locally and answers.
+    monkeypatch.setattr(sc, "check_ping", _fake_ping(
+        lambda h: h == "thria", monitor_side=True))
+    # the templogger's own SSH checks pass
+    monkeypatch.setattr(sc, "check_remote_service", lambda *a, **k: (True, None))
+    monkeypatch.setattr(sc, "check_remote_csv_freshness", lambda *a, **k: (True, None))
+    monkeypatch.setattr(sc, "check_remote_clock", lambda *a, **k: None)
+
+    sent = run_ticks(monkeypatch, list(fleet.values()), [stall_cameras, stall_cameras])
+    assert len(sent) == 1, sent
+    message = sent[0][1]
+    assert "could not resolve or reach 2 of its devices" in message
+    assert "exitcama.local" not in message and "exitcamb.local" not in message
 
 
 def test_a_fleet_wide_skew_collapses_to_one_monitor_clock_message(monkeypatch, fleet):

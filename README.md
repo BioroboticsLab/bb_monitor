@@ -130,29 +130,36 @@ SSH keys must be configured for passwordless login from the machine running the 
 
 ### Diagnosing "Cannot reach ..."
 
-The ping check reports *why* it failed, because the two failure modes mean opposite
-things. `no reply within 2s` (ping exit 1) is the host not answering.
-`Temporary failure in name resolution` (ping exit 2) is *this* machine failing to
-resolve the name — an mDNS/avahi problem on the monitor host, not a dead camera.
+The ping check reports *why* it failed and **whose fault it is**, because the failure
+modes mean opposite things:
 
-**When every configured device is unreachable at once, the monitor blames itself**:
-one `Monitor host cannot reach any of its N devices` instead of N identical lines.
-Cameras do not drop off a network together; the machine they have in common is this
-one. Typically its WiFi has reassociated, which takes avahi and ICMP down with it —
-look for `no longer relevant for mDNS` in `journalctl -u avahi-daemon`.
+| what happened | ping | blamed on |
+|---|---|---|
+| host did not answer | exit 1, silent | the host |
+| name did not resolve | exit 2, `Temporary failure in name resolution` | the monitor |
+| lookup stalled, ping never returned | *(no exit)* | the monitor |
+| no route | exit 2, `Network is unreachable` | the monitor |
 
-Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to pin it down: it
-reproduces exactly what `check_ping()` does, resolves each name, retries with more
-packets, pings the raw IPs to isolate DNS from the network, counts how often the
-interface has dropped in the last 24h, checks WiFi power saving, and prints
-ready-to-paste `/etc/hosts` lines that remove mDNS from the path for good.
+Name resolution runs on the monitor, so a lookup that stalls or fails says nothing
+about the camera. **When two or more hosts fail monitor-side, the alert collapses
+into one line** naming the machine actually at fault, rather than one line per
+camera. It also collapses when *every* pinged host is unreachable — cameras do not
+leave a network together. A host that is genuinely silent keeps its own line either
+way, so a real outage never hides behind a resolver complaint.
 
-Ping retries exist to outlast a dropout on the *monitor*, not to be patient with the
-cameras. While its interface is gone, `ping` fails **instantly**, so a timeout buys
-no coverage at all — only the gaps between attempts do. The span that matters is
-`(ping_attempts - 1) * ping_retry_delay_seconds`, 10s by default, sized against an
-observed ~9s reassociation. Keep `ping_timeout_seconds >= 1`: Linux `ping -W 0`
-waits forever.
+Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to pin it down. Run it
+from a *cold* link (schedule it with `at`): an interactive ssh session keeps WiFi
+awake and hides exactly the stall you are hunting.
+
+A stalled mDNS lookup on WiFi usually means **power saving**. mDNS is multicast, and
+a client in power save only wakes for multicast at DTIM beacons, so a link that idles
+between checks starts every check cold. `sudo iw dev <dev> set power_save off`, and
+add static `/etc/hosts` entries to take multicast out of the path for `ssh` as well
+as `ping`. Neither changes routing.
+
+Retries are spaced so the attempts outlast a hiccup on the monitor's own link rather
+than all landing inside it: `(ping_attempts - 1) * ping_retry_delay_seconds`, 10s by
+default. Keep `ping_timeout_seconds >= 1`: Linux `ping -W 0` waits forever.
 
 ### Tests
 
