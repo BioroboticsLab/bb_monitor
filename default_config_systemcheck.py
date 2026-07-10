@@ -56,6 +56,16 @@ systemcheck_trigger_timeout_seconds = 60
 # - feedercam: ping + clock + raspicam.service + raspicam heartbeat freshness
 #              + imgstorage.service + mini_scale_logger.service + scale CSV freshness
 # - exitcam:   ping + clock + raspicam.service + raspicam heartbeat freshness + imgstorage.service
+#
+# PREFER YOUR ROUTER'S DNS NAMES OVER mDNS ".local" NAMES.
+# A ".local" name is resolved by multicast DNS: the record's TTL is 120s (RFC 6762
+# s10) while this loop runs every 600s, so every check pays a fresh multicast query,
+# and over a WiFi link those are slow and lossy. Most routers already publish a
+# unicast DNS name for every DHCP client (a Fritz!Box serves "<host>.fritz.box"),
+# which is cached, fast, and re-registered automatically when a Pi takes a new lease.
+# Both names reach the same Pi, so the switch is just an edit here — but SSH records
+# host keys per name: seed the new names into known_hosts first, or BatchMode ssh
+# will fail with "Host key verification failed".
 # Per-entry keys override the defaults baked into bb_monitor_systemcheck.py
 # (raspicam heartbeat path, max-age thresholds, scale CSV glob).
 systemcheck_cameras = [

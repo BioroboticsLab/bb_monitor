@@ -151,6 +151,28 @@ Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to pin it down. R
 from a *cold* link (schedule it with `at`): an interactive ssh session keeps WiFi
 awake and hides exactly the stall you are hunting.
 
+### Prefer your router's DNS names over `.local`
+
+A `.local` name is resolved by **multicast** DNS. Its record TTL is 120s
+([RFC 6762 §10](https://www.rfc-editor.org/rfc/rfc6762.html#section-10)) while this
+loop checks every 600s, so every check pays a fresh multicast query — slow and lossy
+over WiFi, and no cache can help.
+
+Most routers already publish a **unicast** DNS name for every DHCP client (a Fritz!Box
+serves `<host>.fritz.box`). Those are cached by the router, resolve in milliseconds,
+and are re-registered automatically when a Pi takes a new lease — so you need neither
+reserved leases nor `/etc/hosts`. Configure the cameras under those names.
+
+Two caveats. SSH records host keys **per name**, so seed the new names into
+`known_hosts` before switching or `BatchMode` ssh fails with `Host key verification
+failed`. And glibc only falls back to the next `nameserver` **on timeout**, never on
+an authoritative `NXDOMAIN` (resolv.conf(5)) — so on a dual-homed host make sure the
+router, not the corporate resolver, answers for that domain
+(`resolvectl domain <wifi-iface> '~fritz.box'`).
+
+This is orthogonal to `-n` below: it removes the *forward* lookup, `-n` removes the
+*reverse* one. Neither makes the other redundant.
+
 ### Why `ping` gets `-n`
 
 This is the single most important line in the ping path. Without `-n`, iputils does a
