@@ -48,24 +48,48 @@ config = mon.get_config(
 # ---------- low-level check helpers ----------
 
 def _ping_args(timeout_seconds):
-    """macOS ping -W is in milliseconds; Linux ping -W is in seconds."""
+    """macOS ping -W is in milliseconds; Linux ping -W is in seconds.
+
+    Both are clamped to at least 1 unit: Linux `ping -W 0` means "wait forever", so
+    a sub-second config value would truncate to a ping that never returns against an
+    unreachable host.
+    """
     if platform.system() == "Darwin":
-        return ["-W", str(int(timeout_seconds * 1000))]
-    return ["-W", str(int(timeout_seconds))]
+        return ["-W", str(max(1, int(timeout_seconds * 1000)))]
+    return ["-W", str(max(1, int(timeout_seconds)))]
 
 
-def check_ping(host, timeout_seconds=2):
-    try:
-        subprocess.run(
-            ["ping", "-c", "1"] + _ping_args(timeout_seconds) + [host],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            timeout=timeout_seconds + 2,
-        )
-        return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+def check_ping(host, timeout_seconds=2, attempts=2):
+    """ICMP-ping `host`. Return (ok, reason); reason is None when ok.
+
+    Reports *why* it failed rather than collapsing everything into "Cannot reach".
+    The two failure modes look identical from the exit code alone but mean entirely
+    different things: exit 1 with no stderr is "the host did not answer", while
+    exit 2 with `Temporary failure in name resolution` is "this machine could not
+    resolve the name" — an mDNS/avahi problem on the monitor, not a dead camera.
+
+    A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so
+    retry before declaring the host unreachable.
+    """
+    reason = None
+    for _ in range(max(1, attempts)):
+        try:
+            proc = subprocess.run(
+                ["ping", "-c", "1"] + _ping_args(timeout_seconds) + [host],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds + 2,
+            )
+        except subprocess.TimeoutExpired:
+            reason = f"ping did not return within {timeout_seconds + 2}s"
+            continue
+        except FileNotFoundError:
+            return False, "ping binary not found"
+        if proc.returncode == 0:
+            return True, None
+        stderr = proc.stderr.decode(errors="replace").strip().splitlines()
+        reason = stderr[-1] if stderr else f"no reply within {timeout_seconds}s"
+    return False, reason
 
 
 def _ssh_run(host, remote_cmd, ssh_timeout):
@@ -333,15 +357,21 @@ def _ssh_target_for(host, user):
     return f"{user}@{host}" if user else host
 
 
-def _camera_checks(cam, ping_timeout, ssh_timeout, clock):
+def _unreachable(host, reason):
+    return Finding(host, "ping", f"Cannot reach {host} ({reason})" if reason
+                   else f"Cannot reach {host}")
+
+
+def _camera_checks(cam, ping_timeout, ping_attempts, ssh_timeout, clock):
     """Run the bundle of checks appropriate for `cam`. Returns list of Findings."""
     host = cam["hostname"]
     cam_type = cam.get("type")
     findings = []
 
-    if not check_ping(host, timeout_seconds=ping_timeout):
+    ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+    if not ok:
         # Skip the rest — SSH-based checks would all just time out.
-        return [Finding(host, "ping", f"Cannot reach {host}")]
+        return [_unreachable(host, reason)]
 
     if cam_type == "feedercam":
         merged = {**_FEEDERCAM_DEFAULTS, **cam}
@@ -398,10 +428,11 @@ def _camera_checks(cam, ping_timeout, ssh_timeout, clock):
     return findings
 
 
-def _templogger_checks(entry, ping_timeout, ssh_timeout, clock):
+def _templogger_checks(entry, ping_timeout, ping_attempts, ssh_timeout, clock):
     host = entry["hostname"]
-    if not check_ping(host, timeout_seconds=ping_timeout):
-        return [Finding(host, "ping", f"Cannot reach {host}")]
+    ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+    if not ok:
+        return [_unreachable(host, reason)]
     findings = []
     ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
     clock.probe(host, ssh_target)
@@ -566,13 +597,15 @@ class _Remediator:
 def run_checks():
     findings = []
     ping_timeout = getattr(config, "ping_timeout_seconds", 2)
+    ping_attempts = getattr(config, "ping_attempts", 2)
     ssh_timeout = getattr(config, "ssh_timeout_seconds", 30)
     max_skew = getattr(config, "systemcheck_max_clock_skew_seconds", 60)
     clock = _ClockCollector(max_skew, ssh_timeout)
 
     for host in getattr(config, "systemcheck_ping_hosts", []):
-        if not check_ping(host, timeout_seconds=ping_timeout):
-            findings.append(Finding(host, "ping", f"Cannot reach {host}"))
+        ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+        if not ok:
+            findings.append(_unreachable(host, reason))
 
     for spec in getattr(config, "systemcheck_process_hosts", []):
         ssh_target = _ssh_target_for(spec["hostname"], spec.get("ssh_user"))
@@ -589,10 +622,10 @@ def run_checks():
             findings.append(Finding(spec["hostname"], f"proc:{spec['match_substring']}", msg))
 
     for cam in getattr(config, "systemcheck_cameras", []):
-        findings.extend(_camera_checks(cam, ping_timeout, ssh_timeout, clock))
+        findings.extend(_camera_checks(cam, ping_timeout, ping_attempts, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_temploggers", []):
-        findings.extend(_templogger_checks(entry, ping_timeout, ssh_timeout, clock))
+        findings.extend(_templogger_checks(entry, ping_timeout, ping_attempts, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_transfer_hosts", []):
         findings.extend(_transfer_checks(entry, ping_timeout, ssh_timeout, clock))

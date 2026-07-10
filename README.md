@@ -128,6 +128,23 @@ Guards: it never fires while `raspicam.service` is stopped (someone is working o
 
 SSH keys must be configured for passwordless login from the machine running the script to every camera, templogger, and process host. No `sudo` is required: the kill targets a process owned by the same user we SSH in as.
 
+### Diagnosing "Cannot reach ..."
+
+The ping check reports *why* it failed, because the two failure modes mean opposite
+things. `no reply within 2s` (ping exit 1) is the host not answering.
+`Temporary failure in name resolution` (ping exit 2) is *this* machine failing to
+resolve the name — an mDNS/avahi problem on the monitor host, not a dead camera.
+Several `.local` hosts failing at once is almost always the latter.
+
+Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to separate them: it
+reproduces exactly what `check_ping()` does, resolves each name, retries with more
+packets, pings the raw IPs to isolate DNS from the network, and dumps recent
+avahi-daemon journal entries.
+
+A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so the
+check retries `ping_attempts` times (default 2) before reporting a host unreachable.
+Keep `ping_timeout_seconds >= 1`: Linux `ping -W 0` waits forever.
+
 ### Tests
 
 The decision logic (two-tick confirmation, clock-skew bounds, heartbeat parsing) lives in `src/systemcheck_core.py` and is pure, so it runs without a network or a Pi:

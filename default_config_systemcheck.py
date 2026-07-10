@@ -107,5 +107,9 @@ systemcheck_transfer_hosts = [
 ]
 
 # Optional overrides; the script has sensible defaults if these are absent.
+# Keep ping_timeout_seconds >= 1: Linux `ping -W 0` waits forever.
+# A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so
+# ping_attempts retries before the host is declared unreachable.
 ping_timeout_seconds = 2
+ping_attempts        = 2
 ssh_timeout_seconds  = 30

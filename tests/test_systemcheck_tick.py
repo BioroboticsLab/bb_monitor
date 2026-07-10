@@ -75,6 +75,13 @@ def _proc(rc, stdout, stderr=""):
         args=[], returncode=rc, stdout=stdout.encode(), stderr=stderr.encode())
 
 
+def _fake_ping(reachable):
+    """check_ping returns (ok, reason); reason is None on success."""
+    def ping(host, timeout_seconds=2, attempts=2):
+        return (True, None) if reachable(host) else (False, "no reply within 2s")
+    return ping
+
+
 @pytest.fixture
 def pi(monkeypatch):
     fake = FakePi()
@@ -96,7 +103,7 @@ def pi(monkeypatch):
         monkeypatch.setattr(cfg, name, value, raising=False)
 
     monkeypatch.setattr(sc, "_ssh_run", fake.ssh)
-    monkeypatch.setattr(sc, "check_ping", lambda host, timeout_seconds=2: fake.reachable)
+    monkeypatch.setattr(sc, "check_ping", _fake_ping(lambda h: fake.reachable))
     return fake
 
 
@@ -181,6 +188,17 @@ def test_a_persistent_fault_is_reported_on_the_second_tick(monkeypatch, pi):
     assert "Cannot reach exitcamd.local" in sent[0][1]
 
 
+def test_the_ping_failure_reason_reaches_the_alert(monkeypatch, pi):
+    """Without the reason, eight simultaneous 'Cannot reach' lines look like eight
+    dead cameras rather than one broken resolver on the monitor host."""
+    monkeypatch.setattr(sc, "check_ping",
+                        lambda host, timeout_seconds=2, attempts=2:
+                        (False, "ping: %s: Temporary failure in name resolution" % host))
+    sent = run_ticks(monkeypatch, pi, [unreachable, unreachable])
+    assert "Cannot reach exitcamd.local" in sent[0][1]
+    assert "Temporary failure in name resolution" in sent[0][1]
+
+
 def test_a_standing_issue_keeps_being_reported_every_tick(monkeypatch, pi):
     """Confirmation delays the first alert; it does not mute the ones after it."""
     sent = run_ticks(monkeypatch, pi, [unreachable] * 4)
@@ -219,6 +237,71 @@ def test_a_blip_mid_incident_does_not_fake_a_recovery(monkeypatch, pi):
     assert [tick for tick, _ in sent] == [1, 3], sent
     assert "Issues found" in sent[0][1] and "stale" in sent[0][1]
     assert sent[1] == (3, "All systems OK"), "the OK must arrive at tick 3, not tick 2"
+
+
+# ---------- check_ping ----------
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+@pytest.mark.parametrize("timeout", [0, 0.4, 0.5, 0.99, 1, 2])
+def test_ping_timeout_argument_is_never_zero(monkeypatch, system, timeout):
+    """Linux `ping -W 0` waits forever, so a sub-second config value truncating to 0
+    would hang against exactly the unreachable host it is meant to time out on
+    (verified: `ping -c 1 -W 0 192.0.2.1` never returns).
+
+    Pinned for both platforms: on macOS -W is milliseconds, so the truncation is
+    harmless there and a Darwin-only test would not catch a missing clamp.
+    """
+    monkeypatch.setattr(sc.platform, "system", lambda: system)
+    flag, value = sc._ping_args(timeout)
+    assert flag == "-W"
+    assert int(value) >= 1
+
+
+def test_ping_reports_name_resolution_failure_distinctly(monkeypatch):
+    """8 hosts failing at once is a resolver problem on this machine, not 8 dead
+    cameras — but only if the message says so. iputils: exit 2 + stderr."""
+    def fake_run(argv, **kw):
+        return subprocess.CompletedProcess(
+            argv, 2, b"", b"ping: feedercama.local: Temporary failure in name resolution\n")
+    monkeypatch.setattr(sc.subprocess, "run", fake_run)
+    ok, reason = sc.check_ping("feedercama.local", attempts=1)
+    assert ok is False
+    assert "Temporary failure in name resolution" in reason
+
+
+def test_ping_reports_a_silent_host_as_no_reply(monkeypatch):
+    """No ICMP answer: iputils exits 1 and prints nothing to stderr."""
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 1, b"", b""))
+    ok, reason = sc.check_ping("exitcamd.local", timeout_seconds=2, attempts=1)
+    assert (ok, reason) == (False, "no reply within 2s")
+
+
+def test_ping_retries_before_declaring_a_host_unreachable(monkeypatch):
+    """A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped."""
+    calls = []
+
+    def flaky(argv, **kw):
+        calls.append(argv)
+        rc = 1 if len(calls) == 1 else 0
+        return subprocess.CompletedProcess(argv, rc, b"", b"")
+
+    monkeypatch.setattr(sc.subprocess, "run", flaky)
+    ok, reason = sc.check_ping("feedercama.local", attempts=2)
+    assert (ok, reason) == (True, None)
+    assert len(calls) == 2, "must actually retry"
+
+
+def test_ping_gives_up_after_the_configured_attempts(monkeypatch):
+    calls = []
+
+    def always_down(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, b"", b"")
+
+    monkeypatch.setattr(sc.subprocess, "run", always_down)
+    ok, _ = sc.check_ping("exitcamd.local", attempts=3)
+    assert ok is False and len(calls) == 3
 
 
 # ---------- the heartbeat probe command itself ----------
@@ -414,7 +497,7 @@ def fleet(monkeypatch):
         monkeypatch.setattr(cfg, name, value, raising=False)
 
     monkeypatch.setattr(sc, "_ssh_run", ssh)
-    monkeypatch.setattr(sc, "check_ping", lambda host, timeout_seconds=2: pis[host].reachable)
+    monkeypatch.setattr(sc, "check_ping", _fake_ping(lambda h: pis[h].reachable))
     return pis
 
 
