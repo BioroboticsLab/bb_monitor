@@ -5,11 +5,39 @@ telegram_bot_token = "FILL IN API TOKEN"
 telegram_chat_id   = "FILL IN TELEGRAM CHAT ID"
 
 # Fast cadence (minutes). The loop wakes on every multiple of this past midnight,
-# but only posts to Telegram when issues are found. The first clean tick after an
-# issue posts a one-time "All systems OK" recovery message, then goes silent again.
-# The first fast-tick of every hour also posts an "All systems OK" summary even
-# when there are no issues.
+# but only posts to Telegram when issues are found. An issue must be seen on TWO
+# consecutive ticks before it is reported, so a blip that clears by the next tick
+# stays quiet; a real fault is announced one tick late. The first fully clean tick
+# after an alert posts a one-time "All systems OK" recovery message, then goes
+# silent again. The first fast-tick of every hour also posts a summary even when
+# there are no issues.
 systemcheck_fast_interval_minutes = 10
+
+# --- Clock check ---
+# Every SSH-reachable host's clock is compared against this machine's, bounded by
+# the SSH round-trip time so a slow connection can never fake a skew. Flag a host
+# whose clock differs by more than this many seconds. When *every* reachable device
+# disagrees in the same direction, the loop reports "monitor host clock may be
+# wrong" once instead of one alert per device.
+systemcheck_max_clock_skew_seconds = 60
+
+# --- Auto-remediation of wedged raspicams ---
+# A raspicam can stop delivering frames while the process stays alive, so
+# `systemctl is-active` says "active" and systemd never restarts it. The only
+# symptom is a stale (or eventually missing) heartbeat file. When that finding is
+# CONFIRMED (seen on two consecutive ticks), SSH in and SIGKILL the raspicam
+# process by name; systemd then restarts it.
+#
+# Guards: never fires while raspicam.service is stopped (someone is working on the
+# device), at most one kill per host per cooldown, and it gives up after
+# max_attempts and says so — a Pi running a raspicam build older than the heartbeat
+# support will never produce one, however often it is restarted.
+systemcheck_remediation_enabled          = True
+systemcheck_remediation_cooldown_minutes = 60
+systemcheck_remediation_max_attempts     = 3
+# Restrict fixes to the top-of-hour tick, so they are less likely to interrupt
+# someone physically at the device.
+systemcheck_remediation_hourly_only      = False
 
 # --- On-demand monitor image on recovery (off by default) ---
 # When the system check detects a recovery (an "All systems OK" right after an
@@ -24,10 +52,10 @@ systemcheck_trigger_monitor_configs = [
 # Per-config wall-clock timeout (seconds) for the one-shot image send.
 systemcheck_trigger_timeout_seconds = 60
 
-# Cameras with bundled per-type checks.
-# - feedercam: ping + raspicam.service + raspicam heartbeat freshness
+# Cameras with bundled per-type checks. Every camera also gets a clock check.
+# - feedercam: ping + clock + raspicam.service + raspicam heartbeat freshness
 #              + imgstorage.service + mini_scale_logger.service + scale CSV freshness
-# - exitcam:   ping + raspicam.service + raspicam heartbeat freshness + imgstorage.service
+# - exitcam:   ping + clock + raspicam.service + raspicam heartbeat freshness + imgstorage.service
 # Per-entry keys override the defaults baked into bb_monitor_systemcheck.py
 # (raspicam heartbeat path, max-age thresholds, scale CSV glob).
 systemcheck_cameras = [

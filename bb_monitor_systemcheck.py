@@ -1,15 +1,27 @@
 """System-check loop for bb_monitor.
 
 Runs camera/templogger/process checks on a fast cadence (default every 10 min),
-silently when everything is OK and immediately on any issue. The first clean
-tick after an issue posts a one-time "all systems OK" recovery message, then the
-loop goes quiet again. Once per hour the loop also emits a sanity-check
-"all systems OK" summary even when there is nothing to report. Posts go to a
+silently when everything is OK and immediately on any *confirmed* issue.
+
+An issue must be seen on two consecutive ticks before it is reported, so a
+short-lived network blip that clears by the next tick never reaches Telegram. The
+cost is that a real fault is announced one tick (default 10 min) later than it is
+first seen. Findings are matched across ticks by a stable (host, kind) key rather
+than by message text, because the text carries volatile detail (a heartbeat's age
+grows every tick) and several different probes share the same wording.
+
+The first fully clean tick after an alert posts a one-time "All systems OK"
+recovery message, then the loop goes quiet again. Once per hour the loop also
+emits a sanity-check summary even when there is nothing to report. Posts go to a
 Telegram channel independent of the monitor image bot.
 
-The "previous tick had issues" flag is in-memory only, so a process restart
-while an issue is outstanding can miss that single recovery message; the hourly
-summary still confirms all-clear within the hour, so it isn't persisted.
+When a camera's raspicam heartbeat problem is confirmed, the loop also tries to fix
+it: it SIGKILLs the remote raspicam process so systemd restarts it. See _Remediator
+for the guards around that.
+
+Confirmation and remediation state is in-memory only, so a process restart while an
+issue is outstanding re-arms the two-tick counter and can miss a single recovery
+message; the hourly summary still confirms all-clear within the hour.
 """
 import os
 import platform
@@ -19,6 +31,13 @@ import time
 from datetime import datetime, timedelta
 
 import src.mon as mon
+from src.systemcheck_core import (
+    Finding,
+    clock_findings,
+    clock_skew,
+    confirm,
+    parse_heartbeat,
+)
 
 config = mon.get_config(
     default_module="default_config_systemcheck",
@@ -78,6 +97,11 @@ def _ssh_failed(proc, stdout):
     """SSH exit 255 (or any non-zero exit with empty stdout) means SSH itself or
     the remote shell never got to the real command. Caller should surface this
     as an SSH failure, not a domain-level failure.
+
+    The "non-zero exit with empty stdout" half of that is a heuristic, and remote
+    commands that can legitimately fail must not rely on it: write them to always
+    exit 0 and always print something, so a domain failure can never be mistaken
+    for a transport failure. check_remote_heartbeat does exactly that.
     """
     return proc.returncode == 255 or (proc.returncode != 0 and not stdout)
 
@@ -117,30 +141,64 @@ def check_remote_service(host, service, ssh_timeout=30, ssh_target=None):
     return False, f"{host}: {service} not active (state={state})"
 
 
-def check_remote_file_mtime(host, path, max_age_seconds, ssh_timeout=30, ssh_target=None):
-    """Compare remote file mtime against remote `date +%s` to avoid clock-skew."""
+def check_remote_heartbeat(host, path, max_age_seconds, ssh_timeout=30, ssh_target=None):
+    """Freshness of a heartbeat file on the remote host. Return (ok, msg, state).
+
+    Both timestamps come from the remote shell, so a constant client/server clock
+    offset cancels out (a clock *step* between the last write and this read does
+    not — that surfaces as "stale" or "future").
+
+    The remote command always exits 0 and always prints a line, so a missing file
+    reaches us as the "missing" state rather than tripping _ssh_failed's
+    "non-zero exit + empty stdout" heuristic and getting mislabelled as a
+    transport error.
+    """
     target = ssh_target if ssh_target is not None else host
-    # `--` lets paths starting with - work; both timestamps come from the remote shell.
-    remote_cmd = f"stat -c %Y -- {path} && date +%s"
+    # p= is unquoted so a leading ~ still expands, as it did when this was a bare
+    # `stat -c %Y -- {path}`; every later use quotes it.
+    remote_cmd = (
+        f"p={path}; now=$(date +%s); "
+        'if [ -e "$p" ]; then m=$(stat -c %Y -- "$p"); echo "OK $m $now"; '
+        'else echo "MISSING $now"; fi'
+    )
     proc, err = _ssh_run(target, remote_cmd, ssh_timeout)
     if proc is None:
-        return False, f"{host}: {err}"
-    stdout = proc.stdout.decode(errors="replace")
+        return False, f"{host}: {err}", "error"
+    stdout = proc.stdout.decode(errors="replace").strip()
     stderr = proc.stderr.decode(errors="replace").strip()
     if _ssh_failed(proc, stdout):
-        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})"
-    if proc.returncode != 0:
-        return False, f"{host}: stat {path} failed ({stderr or f'exit {proc.returncode}'})"
-    lines = stdout.split()
+        return False, f"{host}: ssh exec failed ({stderr or f'exit {proc.returncode}'})", "error"
+
+    state, age = parse_heartbeat(stdout, max_age_seconds)
+    if state == "ok":
+        return True, None, state
+    if state == "missing":
+        return False, f"{host}: {path} missing (raspicam not writing heartbeat)", state
+    if state == "stale":
+        return False, f"{host}: {path} stale ({age}s old, max {max_age_seconds}s)", state
+    if state == "future":
+        return False, f"{host}: {path} mtime is {-age}s in the future (clock stepped?)", state
+    return False, f"{host}: could not parse heartbeat probe output for {path}: {stdout!r}", state
+
+
+def check_remote_clock(host, ssh_timeout=30, ssh_target=None):
+    """Read the remote clock. Return (skew, offset) as defined by clock_skew(), or
+    None when the host could not be reached — its other SSH checks will report that.
+    """
+    target = ssh_target if ssh_target is not None else host
+    t0 = time.time()
+    proc, err = _ssh_run(target, "date +%s", ssh_timeout)
+    t1 = time.time()
+    if proc is None:
+        return None
+    stdout = proc.stdout.decode(errors="replace").strip()
+    if _ssh_failed(proc, stdout):
+        return None
     try:
-        mtime = int(lines[0])
-        now = int(lines[1])
+        remote_epoch = int(stdout.split()[0])
     except (IndexError, ValueError):
-        return False, f"{host}: could not parse stat output for {path}"
-    age = now - mtime
-    if age > max_age_seconds:
-        return False, f"{host}: {path} stale ({age}s old, max {max_age_seconds}s)"
-    return True, None
+        return None
+    return clock_skew(t0, remote_epoch, t1)
 
 
 def check_remote_csv_freshness(host, glob_pattern, max_age_seconds, ssh_timeout=30, ssh_target=None):
@@ -211,6 +269,38 @@ def check_remote_file_count(host, list_command, max_files, ssh_timeout=30, ssh_t
     return True, None
 
 
+# ---------- clock fan-out ----------
+
+class _ClockCollector:
+    """Samples every SSH-reachable host's clock, then turns the samples into findings.
+
+    Deferring the findings until all hosts are sampled lets clock_findings() tell
+    "one device drifted" apart from "our own clock is wrong", which otherwise fans
+    out into one alert per device.
+
+    A transport failure produces no finding — every host we probe also runs at least
+    one domain check over SSH, which surfaces the failure under its own key.
+    """
+
+    def __init__(self, max_skew_seconds, ssh_timeout):
+        self.max_skew_seconds = max_skew_seconds
+        self.ssh_timeout = ssh_timeout
+        self._samples = []      # (host, skew, offset)
+        self._probed = set()
+
+    def probe(self, host, ssh_target):
+        if host in self._probed:  # a host can appear in two config lists
+            return
+        self._probed.add(host)
+        sample = check_remote_clock(host, ssh_timeout=self.ssh_timeout, ssh_target=ssh_target)
+        if sample is not None:
+            skew, offset = sample
+            self._samples.append((host, skew, offset))
+
+    def findings(self):
+        return clock_findings(self._samples, self.max_skew_seconds)
+
+
 # ---------- bundled per-host check sets ----------
 
 # Defaults applied to each camera entry; per-entry keys override.
@@ -229,25 +319,27 @@ _EXITCAM_DEFAULTS = {
     "raspicam_max_age_seconds": 30,
 }
 
+RASPICAM_SERVICE = "raspicam.service"
+
 
 def _ssh_target_for(host, user):
     return f"{user}@{host}" if user else host
 
 
-def _camera_checks(cam, ping_timeout, ssh_timeout):
-    """Run the bundle of checks appropriate for `cam`. Returns list of issue strings."""
+def _camera_checks(cam, ping_timeout, ssh_timeout, clock):
+    """Run the bundle of checks appropriate for `cam`. Returns list of Findings."""
     host = cam["hostname"]
     cam_type = cam.get("type")
-    issues = []
+    findings = []
 
     if not check_ping(host, timeout_seconds=ping_timeout):
         # Skip the rest — SSH-based checks would all just time out.
-        return [f"Cannot reach {host}"]
+        return [Finding(host, "ping", f"Cannot reach {host}")]
 
     if cam_type == "feedercam":
         merged = {**_FEEDERCAM_DEFAULTS, **cam}
         service_checks = [
-            ("raspicam.service", merged["raspicam_heartbeat"], merged["raspicam_max_age_seconds"]),
+            (RASPICAM_SERVICE, merged["raspicam_heartbeat"], merged["raspicam_max_age_seconds"]),
             ("imgstorage.service", None, None),
             ("mini_scale_logger.service", None, None),
         ]
@@ -256,30 +348,37 @@ def _camera_checks(cam, ping_timeout, ssh_timeout):
     elif cam_type == "exitcam":
         merged = {**_EXITCAM_DEFAULTS, **cam}
         service_checks = [
-            ("raspicam.service", merged["raspicam_heartbeat"], merged["raspicam_max_age_seconds"]),
+            (RASPICAM_SERVICE, merged["raspicam_heartbeat"], merged["raspicam_max_age_seconds"]),
             ("imgstorage.service", None, None),
         ]
         scale_glob = None
         scale_age = None
     else:
-        return [f"{host}: unknown camera type {cam_type!r}"]
+        return [Finding(host, "config", f"{host}: unknown camera type {cam_type!r}")]
 
     ssh_target = _ssh_target_for(host, merged.get("ssh_user"))
+    clock.probe(host, ssh_target)
 
     for service, heartbeat_path, heartbeat_age in service_checks:
         ok, msg = check_remote_service(
             host, service, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
         )
         if not ok:
-            issues.append(msg)
+            findings.append(Finding(host, f"svc:{service}", msg))
             continue
         if heartbeat_path is not None:
-            ok, msg = check_remote_file_mtime(
+            ok, msg, state = check_remote_heartbeat(
                 host, heartbeat_path, heartbeat_age,
                 ssh_timeout=ssh_timeout, ssh_target=ssh_target,
             )
             if not ok:
-                issues.append(msg)
+                # "future" is a clock artefact, not a wedged camera: restarting it
+                # would not help and the clock check reports the real problem.
+                findings.append(Finding(
+                    host, "heartbeat", msg,
+                    remediable=state in ("missing", "stale"),
+                    ssh_target=ssh_target,
+                ))
 
     if scale_glob is not None:
         ok, msg = check_remote_csv_freshness(
@@ -287,38 +386,40 @@ def _camera_checks(cam, ping_timeout, ssh_timeout):
             ssh_timeout=ssh_timeout, ssh_target=ssh_target,
         )
         if not ok:
-            issues.append(msg)
+            findings.append(Finding(host, f"csv:{scale_glob}", msg))
 
-    return issues
+    return findings
 
 
-def _templogger_checks(entry, ping_timeout, ssh_timeout):
+def _templogger_checks(entry, ping_timeout, ssh_timeout, clock):
     host = entry["hostname"]
     if not check_ping(host, timeout_seconds=ping_timeout):
-        return [f"Cannot reach {host}"]
-    issues = []
+        return [Finding(host, "ping", f"Cannot reach {host}")]
+    findings = []
     ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
+    clock.probe(host, ssh_target)
     service = entry.get("service", "temperaturelogger.service")
     ok, msg = check_remote_service(host, service, ssh_timeout=ssh_timeout, ssh_target=ssh_target)
     if not ok:
-        issues.append(msg)
+        findings.append(Finding(host, f"svc:{service}", msg))
     glob_pattern = entry["csv_glob"]
     max_age = entry.get("max_age_seconds", 60)
     ok, msg = check_remote_csv_freshness(
         host, glob_pattern, max_age, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
     )
     if not ok:
-        issues.append(msg)
-    return issues
+        findings.append(Finding(host, f"csv:{glob_pattern}", msg))
+    return findings
 
 
-def _transfer_checks(entry, ping_timeout, ssh_timeout):
+def _transfer_checks(entry, ping_timeout, ssh_timeout, clock):
     """Count files awaiting transfer under the host's bb_imgacquisition out/ dir.
     No ping pre-check (these are wired servers, like systemcheck_process_hosts);
     ping_timeout is accepted only for signature symmetry with the other runners.
     """
     host = entry["hostname"]
     ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
+    clock.probe(host, ssh_target)
     max_files = entry.get("num_files_to_warn", 60)
     command = entry.get("command")
     if command is None:
@@ -327,42 +428,160 @@ def _transfer_checks(entry, ping_timeout, ssh_timeout):
     ok, msg = check_remote_file_count(
         host, command, max_files, ssh_timeout=ssh_timeout, ssh_target=ssh_target,
     )
-    return [] if ok else [msg]
+    return [] if ok else [Finding(host, "transfer", msg)]
+
+
+# ---------- remediation ----------
+
+# Kill the wedged raspicam so systemd restarts it. Every piece is load-bearing:
+#
+#   [r]aspicam\.py  the regex matches "raspicam.py", but the remote login shell's own
+#                   /proc/pid/cmdline holds the literal brackets, so `pkill -f` cannot
+#                   kill the SSH session it is running in. pkill excludes itself, but
+#                   not its parent.
+#   -u "$uid"       scope to the SSH user, who owns the process — so no sudo. (It is
+#                   the pattern, not the uid, that spares imgstorage.py: that also
+#                   runs as pi.)
+#   -KILL           systemd counts SIGTERM as a *clean* exit, so `Restart=on-failure`
+#                   (what setup_autostart.sh deployed for years) would not restart a
+#                   SIGTERMed unit. SIGKILL restarts under both policies. raspicam.py
+#                   installs no signal handler, so nothing graceful is lost.
+#   wc -l, exit 0   `pkill` exits 1 when nothing matched; a non-zero exit with empty
+#                   stdout is exactly what _ssh_failed reads as a transport error.
+_REMEDIATION_CMD = (
+    r"""pat='[r]aspicam\.py'; uid=$(id -u); """
+    r"""n=$(pgrep -u "$uid" -f "$pat" 2>/dev/null | wc -l | tr -d ' '); """
+    r"""pkill -KILL -u "$uid" -f "$pat" 2>/dev/null; """
+    r"""echo "killed $n"; exit 0"""
+)
+
+
+def kill_remote_raspicam(host, ssh_target, ssh_timeout=30):
+    """SIGKILL the remote raspicam process(es). Return (ok, detail).
+
+    Deliberately does not go through _ssh_failed: only ssh's own 255 counts as a
+    failure here.
+    """
+    target = ssh_target if ssh_target is not None else host
+    proc, err = _ssh_run(target, _REMEDIATION_CMD, ssh_timeout)
+    if proc is None:
+        return False, err
+    stdout = proc.stdout.decode(errors="replace").strip()
+    stderr = proc.stderr.decode(errors="replace").strip()
+    if proc.returncode == 255:
+        return False, stderr or "ssh exit 255"
+    if not stdout.startswith("killed"):
+        return False, stderr or f"unexpected output {stdout!r}"
+    return True, stdout
+
+
+class _Remediator:
+    """Restarts wedged raspicams, with the guards that keep it from doing harm.
+
+    Only fires on a *confirmed* heartbeat finding (two consecutive ticks), never
+    when the service is stopped (that means a human stopped it), at most once per
+    cooldown per host, and at most max_attempts times before it gives up and says
+    so — a Pi running a raspicam build that predates the heartbeat will never
+    produce one no matter how often it is restarted.
+
+    State is in-memory, like the confirmation counter: a monitor restart re-arms
+    both, which is the conservative direction (it delays a kill, never repeats one).
+    """
+
+    def __init__(self, cfg):
+        self.enabled = getattr(cfg, "systemcheck_remediation_enabled", True)
+        self.cooldown_seconds = 60 * getattr(cfg, "systemcheck_remediation_cooldown_minutes", 60)
+        self.max_attempts = getattr(cfg, "systemcheck_remediation_max_attempts", 3)
+        self.hourly_only = getattr(cfg, "systemcheck_remediation_hourly_only", False)
+        self.ssh_timeout = getattr(cfg, "ssh_timeout_seconds", 30)
+        self._attempts = {}       # host -> attempts since the heartbeat last recovered
+        self._last_attempt = {}   # host -> time.monotonic() of the last kill
+
+    def forget_recovered(self, found_keys):
+        """Clear a host's attempt budget once its heartbeat check passes again."""
+        for host in [h for h in self._attempts if (h, "heartbeat") not in found_keys]:
+            del self._attempts[host]
+            self._last_attempt.pop(host, None)
+
+    def run(self, confirmed, found_keys, is_hourly_tick):
+        """Attempt fixes for confirmed findings. Returns extra lines for the alert."""
+        if not self.enabled:
+            return []
+        if self.hourly_only and not is_hourly_tick:
+            return []
+
+        lines = []
+        now = time.monotonic()
+        for finding in confirmed:
+            if finding.kind != "heartbeat" or not finding.remediable:
+                continue
+            # Someone ran `systemctl stop raspicam` — don't fight them. (The camera
+            # checks skip the heartbeat probe when the service is down, so this can
+            # only trigger if the service died between the two probes.)
+            if (finding.host, f"svc:{RASPICAM_SERVICE}") in found_keys:
+                continue
+
+            attempts = self._attempts.get(finding.host, 0)
+            if attempts >= self.max_attempts:
+                lines.append(
+                    f"- {finding.host}: auto-restart did not help after {attempts} attempts "
+                    f"— check that bb_raspicam is up to date on this Pi"
+                )
+                continue
+            last = self._last_attempt.get(finding.host)
+            if last is not None and now - last < self.cooldown_seconds:
+                continue
+
+            ok, detail = kill_remote_raspicam(
+                finding.host, finding.ssh_target, ssh_timeout=self.ssh_timeout,
+            )
+            self._attempts[finding.host] = attempts + 1
+            self._last_attempt[finding.host] = now
+            if ok:
+                lines.append(f"- ↻ restarted raspicam on {finding.host} ({detail})")
+            else:
+                lines.append(f"- {finding.host}: auto-restart failed ({detail})")
+        return lines
 
 
 # ---------- top-level run ----------
 
 def run_checks():
-    issues = []
+    findings = []
     ping_timeout = getattr(config, "ping_timeout_seconds", 2)
     ssh_timeout = getattr(config, "ssh_timeout_seconds", 30)
+    max_skew = getattr(config, "systemcheck_max_clock_skew_seconds", 60)
+    clock = _ClockCollector(max_skew, ssh_timeout)
 
     for host in getattr(config, "systemcheck_ping_hosts", []):
         if not check_ping(host, timeout_seconds=ping_timeout):
-            issues.append(f"Cannot reach {host}")
+            findings.append(Finding(host, "ping", f"Cannot reach {host}"))
 
     for spec in getattr(config, "systemcheck_process_hosts", []):
+        ssh_target = _ssh_target_for(spec["hostname"], spec.get("ssh_user"))
+        clock.probe(spec["hostname"], ssh_target)
         ok, msg = check_remote_process(
             spec["hostname"],
             spec["command"],
             spec["match_substring"],
             spec["min_count"],
             ssh_timeout=ssh_timeout,
-            ssh_target=_ssh_target_for(spec["hostname"], spec.get("ssh_user")),
+            ssh_target=ssh_target,
         )
         if not ok:
-            issues.append(msg)
+            findings.append(Finding(spec["hostname"], f"proc:{spec['match_substring']}", msg))
 
     for cam in getattr(config, "systemcheck_cameras", []):
-        issues.extend(_camera_checks(cam, ping_timeout, ssh_timeout))
+        findings.extend(_camera_checks(cam, ping_timeout, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_temploggers", []):
-        issues.extend(_templogger_checks(entry, ping_timeout, ssh_timeout))
+        findings.extend(_templogger_checks(entry, ping_timeout, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_transfer_hosts", []):
-        issues.extend(_transfer_checks(entry, ping_timeout, ssh_timeout))
+        findings.extend(_transfer_checks(entry, ping_timeout, ssh_timeout, clock))
 
-    return issues
+    findings.extend(clock.findings())
+    return findings
 
 
 def _notify(text):
@@ -406,34 +625,52 @@ def _trigger_monitor_images():
 def main():
     print("Starting bb_monitor_systemcheck...")
     fast_minutes = max(1, int(getattr(config, "systemcheck_fast_interval_minutes", 10)))
-    previous_had_issues = False
+    remediator = _Remediator(config)
+    pending = set()          # keys seen on the previous tick, not yet reported
+    alerted = False          # an alert was sent and has not been recovered from
     while True:
         loop_start = datetime.now()
-        issues = run_checks()
+        found = run_checks()
+        confirmed, pending = confirm(pending, found)
+        found_keys = {f.key for f in found}
+        remediator.forget_recovered(found_keys)
         # The first fast tick of every hour also emits the "all OK" sanity ping.
         is_hourly_tick = loop_start.minute < fast_minutes
-        # Recovery = the error->clear edge (captured before previous_had_issues is mutated).
-        is_recovery = (not issues) and previous_had_issues
 
-        if issues:
-            _notify("Issues found:\n" + "\n".join(f"- {i}" for i in issues))
+        if confirmed:
+            lines = [f"- {f.message}" for f in confirmed]
+            lines += remediator.run(confirmed, found_keys, is_hourly_tick)
+            _notify("Issues found:\n" + "\n".join(lines))
             # Set unconditionally: the system did have issues even if the alert
             # couldn't be delivered, so the next clean tick should still recover.
-            previous_had_issues = True
-        elif previous_had_issues or is_hourly_tick:
-            # Recovery ("previous tick had issues") and the hourly sanity ping send
+            alerted = True
+        elif not found_keys and (alerted or is_hourly_tick):
+            # Recovery ("an alert is outstanding") and the hourly sanity ping send
             # the same text, so they share one branch — and coincide as a single send.
+            #
+            # Recovery demands a *completely* clean tick, not merely no confirmed
+            # findings. A finding vanishing from `found` does not prove it was fixed:
+            # _camera_checks returns early when ping fails, so a transient blip hides
+            # a wedged camera's heartbeat finding and would otherwise be read as
+            # "recovered".
+            is_recovery = alerted
             if _notify("All systems OK"):
                 # Clear only on a confirmed send so a failed recovery is retried next
                 # tick; when already False (plain hourly tick) this is a safe no-op.
-                previous_had_issues = False
+                alerted = False
                 # On a genuine recovery (not a plain hourly OK), push a fresh monitor
                 # image so the cameras can be visually confirmed back. Gating on the
                 # confirmed send means exactly one image per error->clear edge.
                 if is_recovery:
                     _trigger_monitor_images()
+        elif is_hourly_tick:
+            # Unconfirmed findings only. Keep the hourly liveness ping, but don't
+            # claim everything is fine — and don't clear `alerted`.
+            unconfirmed = "\n".join(f"- {f.message}" for f in found)
+            _notify(f"No confirmed issues; {len(found)} awaiting confirmation:\n{unconfirmed}")
         else:
-            print(f"[{loop_start.isoformat(timespec='seconds')}] all OK (silent)", flush=True)
+            state = f"{len(found)} unconfirmed" if found else "all OK"
+            print(f"[{loop_start.isoformat(timespec='seconds')}] {state} (silent)", flush=True)
 
         # Sleep until the next snap minute (a multiple of fast_minutes since midnight).
         midnight = loop_start.replace(hour=0, minute=0, second=0, microsecond=0)
