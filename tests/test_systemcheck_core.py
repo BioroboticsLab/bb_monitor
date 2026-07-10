@@ -14,8 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.systemcheck_core import (  # noqa: E402
     MONITOR_HOST,
     Finding,
+    PingSettings,
     clock_findings,
     clock_skew,
+    collapse_unreachable,
     confirm,
     parse_heartbeat,
 )
@@ -184,6 +186,82 @@ def test_monitor_is_not_blamed_when_some_devices_are_fine():
     samples = [("a", 137.0, 137.0), ("b", 137.0, 137.0), ("c", 0.0, 0.0)]
     findings = clock_findings(samples, max_skew_seconds=60)
     assert {f.host for f in findings} == {"a", "b"}
+
+
+# ---------- PingSettings ----------
+
+def test_default_retries_outlast_an_observed_wifi_dropout():
+    """thria's wlp3s0 left and rejoined the mDNS group over ~9s (avahi journal,
+    10:26:37 -> 10:26:46). During that window ping fails instantly, so only the
+    delays between attempts cover it — the timeouts contribute nothing."""
+    assert PingSettings().retry_span_seconds() >= 10
+
+
+def test_retry_span_ignores_the_timeout_because_a_dead_resolver_fails_instantly():
+    fast_failing = PingSettings(timeout_seconds=60, attempts=2, retry_delay_seconds=1)
+    assert fast_failing.retry_span_seconds() == 1, "a huge timeout buys no dropout coverage"
+
+
+def test_a_single_attempt_spans_nothing():
+    assert PingSettings(attempts=1).retry_span_seconds() == 0
+
+
+def test_worst_case_bounds_the_time_spent_on_one_unreachable_host():
+    p = PingSettings(timeout_seconds=2, attempts=3, retry_delay_seconds=5)
+    assert p.worst_case_seconds() == 3 * (2 + 3) + 2 * 5
+
+
+# ---------- collapse_unreachable() ----------
+
+def unreachable(host, reason="no reply within 2s"):
+    return Finding(host, "ping", f"Cannot reach {host} ({reason})")
+
+
+def test_a_whole_fleet_unreachable_blames_the_monitor_host():
+    """Eight cameras do not drop off a network together."""
+    hosts = [f"cam{i}.local" for i in range(8)]
+    findings = collapse_unreachable([unreachable(h) for h in hosts], hosts_pinged=8)
+    assert len(findings) == 1
+    assert findings[0].key == (MONITOR_HOST, "network")
+    assert "cannot reach any of its 8 devices" in findings[0].message
+
+
+def test_the_collapsed_message_carries_the_underlying_reason():
+    findings = collapse_unreachable(
+        [unreachable("a.local", "Temporary failure in name resolution"),
+         unreachable("b.local", "Temporary failure in name resolution")],
+        hosts_pinged=2)
+    assert "Temporary failure in name resolution" in findings[0].message
+
+
+def test_one_dead_camera_among_many_is_still_blamed_on_that_camera():
+    findings = collapse_unreachable([unreachable("cam3.local")], hosts_pinged=8)
+    assert [f.key for f in findings] == [("cam3.local", "ping")]
+
+
+def test_a_lone_configured_host_is_never_blamed_on_the_monitor():
+    """With one camera, "everything is unreachable" carries no information."""
+    findings = collapse_unreachable([unreachable("cam0.local")], hosts_pinged=1)
+    assert findings[0].key == ("cam0.local", "ping")
+
+
+def test_collapse_preserves_non_ping_findings():
+    findings = collapse_unreachable(
+        [unreachable("a.local"), unreachable("b.local"),
+         Finding("c.local", "heartbeat", "stale")],
+        hosts_pinged=2)
+    kinds = {f.kind for f in findings}
+    assert kinds == {"network", "heartbeat"}
+
+
+def test_a_fleet_wide_outage_is_one_key_so_it_confirms_as_one_issue():
+    """Two consecutive ticks of total outage => a single alert, not eight."""
+    hosts = [f"cam{i}.local" for i in range(8)]
+    tick = lambda: collapse_unreachable([unreachable(h) for h in hosts], hosts_pinged=8)
+    confirmed, pending = confirm(set(), tick())
+    assert confirmed == []
+    confirmed, _ = confirm(pending, tick())
+    assert len(confirmed) == 1
 
 
 # ---------- parse_heartbeat() ----------

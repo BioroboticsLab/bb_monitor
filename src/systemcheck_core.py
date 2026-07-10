@@ -14,6 +14,42 @@ from typing import NamedTuple, Optional
 MONITOR_HOST = "__monitor__"
 
 
+class PingSettings(NamedTuple):
+    """How hard to try before calling a host unreachable.
+
+    Retries are *spaced*, not back-to-back. A WiFi interface that drops off and
+    reassociates takes the monitor host's resolver and network with it for a few
+    seconds, and during that window `ping` fails **instantly** ("Temporary failure in
+    name resolution") rather than waiting out its timeout. So back-to-back retries
+    all land inside the dropout and report the whole fleet dead. What matters is the
+    wall-clock span between the first and last attempt, not the number of attempts.
+
+    Defaults span ~10s of dropout, sized against a real ~9s wlp3s0 reassociation.
+    """
+    timeout_seconds: float = 2
+    attempts: int = 3
+    retry_delay_seconds: float = 5
+
+    def retry_span_seconds(self):
+        """Wall clock covered by the retries when every attempt fails instantly.
+
+        The pessimistic case, and the one that matters: a resolution failure returns
+        immediately, so only the delays separate the attempts.
+        """
+        return max(0, self.attempts - 1) * self.retry_delay_seconds
+
+    def worst_case_seconds(self):
+        """Wall clock per host when every attempt runs to its full timeout."""
+        per_attempt = self.timeout_seconds + RESOLVE_GRACE_SECONDS
+        return self.attempts * per_attempt + self.retry_span_seconds()
+
+
+# `ping -W` bounds only the wait for an ICMP reply; name resolution happens before
+# that and is unbounded by it. Give each attempt this much extra wall clock so a
+# slow mDNS lookup is not mistaken for an unreachable host.
+RESOLVE_GRACE_SECONDS = 3
+
+
 class Finding(NamedTuple):
     """One failing check.
 
@@ -81,6 +117,30 @@ def clock_findings(samples, max_skew_seconds):
 def _same_sign(values):
     values = list(values)
     return all(v > 0 for v in values) or all(v < 0 for v in values)
+
+
+def collapse_unreachable(findings, hosts_pinged):
+    """Replace "every device is unreachable" with one finding blaming the monitor.
+
+    Eight cameras do not drop off a network together. When nothing at all answers,
+    the one machine common to every failed check is this one — typically its WiFi
+    reassociating, which takes mDNS and ICMP down with it. Reporting that once is
+    both truer and quieter than eight identical `Cannot reach ...` lines.
+
+    Keyed on MONITOR_HOST, so the two-tick confirmation treats a fleet-wide outage as
+    a single issue that must persist before anyone is told about it.
+    """
+    unreachable = [f for f in findings if f.kind == "ping"]
+    if hosts_pinged < 2 or len(unreachable) < hosts_pinged:
+        return findings
+    reason = unreachable[0].message.partition("(")[2].rstrip(")")
+    detail = f": {reason}" if reason else ""
+    survivors = [f for f in findings if f.kind != "ping"]
+    return survivors + [Finding(
+        MONITOR_HOST, "network",
+        f"Monitor host cannot reach any of its {hosts_pinged} devices "
+        f"— check its own network{detail}",
+    )]
 
 
 def confirm(pending, found):

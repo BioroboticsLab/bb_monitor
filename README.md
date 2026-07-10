@@ -134,16 +134,25 @@ The ping check reports *why* it failed, because the two failure modes mean oppos
 things. `no reply within 2s` (ping exit 1) is the host not answering.
 `Temporary failure in name resolution` (ping exit 2) is *this* machine failing to
 resolve the name — an mDNS/avahi problem on the monitor host, not a dead camera.
-Several `.local` hosts failing at once is almost always the latter.
 
-Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to separate them: it
+**When every configured device is unreachable at once, the monitor blames itself**:
+one `Monitor host cannot reach any of its N devices` instead of N identical lines.
+Cameras do not drop off a network together; the machine they have in common is this
+one. Typically its WiFi has reassociated, which takes avahi and ICMP down with it —
+look for `no longer relevant for mDNS` in `journalctl -u avahi-daemon`.
+
+Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to pin it down: it
 reproduces exactly what `check_ping()` does, resolves each name, retries with more
-packets, pings the raw IPs to isolate DNS from the network, and dumps recent
-avahi-daemon journal entries.
+packets, pings the raw IPs to isolate DNS from the network, counts how often the
+interface has dropped in the last 24h, checks WiFi power saving, and prints
+ready-to-paste `/etc/hosts` lines that remove mDNS from the path for good.
 
-A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so the
-check retries `ping_attempts` times (default 2) before reporting a host unreachable.
-Keep `ping_timeout_seconds >= 1`: Linux `ping -W 0` waits forever.
+Ping retries exist to outlast a dropout on the *monitor*, not to be patient with the
+cameras. While its interface is gone, `ping` fails **instantly**, so a timeout buys
+no coverage at all — only the gaps between attempts do. The span that matters is
+`(ping_attempts - 1) * ping_retry_delay_seconds`, 10s by default, sized against an
+observed ~9s reassociation. Keep `ping_timeout_seconds >= 1`: Linux `ping -W 0`
+waits forever.
 
 ### Tests
 

@@ -107,9 +107,15 @@ systemcheck_transfer_hosts = [
 ]
 
 # Optional overrides; the script has sensible defaults if these are absent.
+#
 # Keep ping_timeout_seconds >= 1: Linux `ping -W 0` waits forever.
-# A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so
-# ping_attempts retries before the host is declared unreachable.
-ping_timeout_seconds = 2
-ping_attempts        = 2
-ssh_timeout_seconds  = 30
+#
+# The retries exist to outlast a dropout on the MONITOR host, not to be patient with
+# the cameras. When its WiFi reassociates (a few seconds), `ping` fails instantly
+# with "Temporary failure in name resolution" — so back-to-back retries would all
+# land inside the dropout and report the whole fleet dead. What matters is the span
+# they cover: (attempts - 1) * retry_delay_seconds, here 2 * 5 = 10s.
+ping_timeout_seconds     = 2
+ping_attempts            = 3
+ping_retry_delay_seconds = 5
+ssh_timeout_seconds      = 30

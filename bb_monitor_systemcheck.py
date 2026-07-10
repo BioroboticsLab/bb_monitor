@@ -32,9 +32,12 @@ from datetime import datetime, timedelta
 
 import src.mon as mon
 from src.systemcheck_core import (
+    RESOLVE_GRACE_SECONDS,
     Finding,
+    PingSettings,
     clock_findings,
     clock_skew,
+    collapse_unreachable,
     confirm,
     parse_heartbeat,
 )
@@ -59,7 +62,7 @@ def _ping_args(timeout_seconds):
     return ["-W", str(max(1, int(timeout_seconds)))]
 
 
-def check_ping(host, timeout_seconds=2, attempts=2):
+def check_ping(host, ping=None):
     """ICMP-ping `host`. Return (ok, reason); reason is None when ok.
 
     Reports *why* it failed rather than collapsing everything into "Cannot reach".
@@ -68,28 +71,43 @@ def check_ping(host, timeout_seconds=2, attempts=2):
     exit 2 with `Temporary failure in name resolution` is "this machine could not
     resolve the name" — an mDNS/avahi problem on the monitor, not a dead camera.
 
-    A single ICMP packet to a power-saving Pi over WiFi is occasionally dropped, so
-    retry before declaring the host unreachable.
+    Retries are spaced by `retry_delay_seconds` so that the attempts span a WiFi
+    dropout on the monitor host rather than all landing inside it. See PingSettings.
     """
+    ping = ping or PingSettings()
+    deadline = ping.timeout_seconds + RESOLVE_GRACE_SECONDS
     reason = None
-    for _ in range(max(1, attempts)):
+    for attempt in range(max(1, ping.attempts)):
+        if attempt:
+            time.sleep(ping.retry_delay_seconds)
         try:
             proc = subprocess.run(
-                ["ping", "-c", "1"] + _ping_args(timeout_seconds) + [host],
+                ["ping", "-c", "1"] + _ping_args(ping.timeout_seconds) + [host],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=timeout_seconds + 2,
+                timeout=deadline,
             )
         except subprocess.TimeoutExpired:
-            reason = f"ping did not return within {timeout_seconds + 2}s"
+            reason = f"ping did not return within {deadline}s (slow name resolution?)"
             continue
         except FileNotFoundError:
             return False, "ping binary not found"
         if proc.returncode == 0:
             return True, None
         stderr = proc.stderr.decode(errors="replace").strip().splitlines()
-        reason = stderr[-1] if stderr else f"no reply within {timeout_seconds}s"
+        reason = stderr[-1] if stderr else f"no reply within {ping.timeout_seconds}s"
     return False, reason
+
+
+def _ping_settings(cfg):
+    """Config overrides on top of PingSettings' own defaults, which stay the single
+    source of truth for how long a dropout the retries must outlast."""
+    default = PingSettings()
+    return PingSettings(
+        timeout_seconds=getattr(cfg, "ping_timeout_seconds", default.timeout_seconds),
+        attempts=getattr(cfg, "ping_attempts", default.attempts),
+        retry_delay_seconds=getattr(cfg, "ping_retry_delay_seconds", default.retry_delay_seconds),
+    )
 
 
 def _ssh_run(host, remote_cmd, ssh_timeout):
@@ -362,13 +380,13 @@ def _unreachable(host, reason):
                    else f"Cannot reach {host}")
 
 
-def _camera_checks(cam, ping_timeout, ping_attempts, ssh_timeout, clock):
+def _camera_checks(cam, ping, ssh_timeout, clock):
     """Run the bundle of checks appropriate for `cam`. Returns list of Findings."""
     host = cam["hostname"]
     cam_type = cam.get("type")
     findings = []
 
-    ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+    ok, reason = check_ping(host, ping)
     if not ok:
         # Skip the rest — SSH-based checks would all just time out.
         return [_unreachable(host, reason)]
@@ -428,9 +446,9 @@ def _camera_checks(cam, ping_timeout, ping_attempts, ssh_timeout, clock):
     return findings
 
 
-def _templogger_checks(entry, ping_timeout, ping_attempts, ssh_timeout, clock):
+def _templogger_checks(entry, ping, ssh_timeout, clock):
     host = entry["hostname"]
-    ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+    ok, reason = check_ping(host, ping)
     if not ok:
         return [_unreachable(host, reason)]
     findings = []
@@ -450,10 +468,10 @@ def _templogger_checks(entry, ping_timeout, ping_attempts, ssh_timeout, clock):
     return findings
 
 
-def _transfer_checks(entry, ping_timeout, ssh_timeout, clock):
+def _transfer_checks(entry, ping, ssh_timeout, clock):
     """Count files awaiting transfer under the host's bb_imgacquisition out/ dir.
     No ping pre-check (these are wired servers, like systemcheck_process_hosts);
-    ping_timeout is accepted only for signature symmetry with the other runners.
+    `ping` is accepted only for signature symmetry with the other runners.
     """
     host = entry["hostname"]
     ssh_target = _ssh_target_for(host, entry.get("ssh_user"))
@@ -596,14 +614,19 @@ class _Remediator:
 
 def run_checks():
     findings = []
-    ping_timeout = getattr(config, "ping_timeout_seconds", 2)
-    ping_attempts = getattr(config, "ping_attempts", 2)
+    ping = _ping_settings(config)
     ssh_timeout = getattr(config, "ssh_timeout_seconds", 30)
     max_skew = getattr(config, "systemcheck_max_clock_skew_seconds", 60)
     clock = _ClockCollector(max_skew, ssh_timeout)
 
+    # Cameras and temploggers are ping-gated inside their runners; count them here so
+    # collapse_unreachable() can tell "some hosts are down" from "we are down".
+    hosts_pinged = (len(getattr(config, "systemcheck_ping_hosts", []))
+                    + len(getattr(config, "systemcheck_cameras", []))
+                    + len(getattr(config, "systemcheck_temploggers", [])))
+
     for host in getattr(config, "systemcheck_ping_hosts", []):
-        ok, reason = check_ping(host, timeout_seconds=ping_timeout, attempts=ping_attempts)
+        ok, reason = check_ping(host, ping)
         if not ok:
             findings.append(_unreachable(host, reason))
 
@@ -622,16 +645,30 @@ def run_checks():
             findings.append(Finding(spec["hostname"], f"proc:{spec['match_substring']}", msg))
 
     for cam in getattr(config, "systemcheck_cameras", []):
-        findings.extend(_camera_checks(cam, ping_timeout, ping_attempts, ssh_timeout, clock))
+        findings.extend(_camera_checks(cam, ping, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_temploggers", []):
-        findings.extend(_templogger_checks(entry, ping_timeout, ping_attempts, ssh_timeout, clock))
+        findings.extend(_templogger_checks(entry, ping, ssh_timeout, clock))
 
     for entry in getattr(config, "systemcheck_transfer_hosts", []):
-        findings.extend(_transfer_checks(entry, ping_timeout, ssh_timeout, clock))
+        findings.extend(_transfer_checks(entry, ping, ssh_timeout, clock))
 
     findings.extend(clock.findings())
-    return findings
+    return collapse_unreachable(findings, hosts_pinged)
+
+
+def _warn_if_ping_budget_overruns_tick(fast_minutes):
+    """A fleet-wide outage pings every host to exhaustion. Make sure that still fits
+    inside one tick, or the loop silently falls behind its own schedule."""
+    ping = _ping_settings(config)
+    hosts = (len(getattr(config, "systemcheck_ping_hosts", []))
+             + len(getattr(config, "systemcheck_cameras", []))
+             + len(getattr(config, "systemcheck_temploggers", [])))
+    budget = hosts * ping.worst_case_seconds()
+    if budget > fast_minutes * 60:
+        print(f"WARNING: with every host down, pinging alone would take ~{budget:.0f}s, "
+              f"longer than the {fast_minutes}-minute check interval. Lower "
+              f"ping_attempts or ping_retry_delay_seconds.", flush=True)
 
 
 def _notify(text):
@@ -675,6 +712,7 @@ def _trigger_monitor_images():
 def main():
     print("Starting bb_monitor_systemcheck...")
     fast_minutes = max(1, int(getattr(config, "systemcheck_fast_interval_minutes", 10)))
+    _warn_if_ping_budget_overruns_tick(fast_minutes)
     remediator = _Remediator(config)
     pending = set()          # keys seen on the previous tick, not yet reported
     alerted = False          # an alert was sent and has not been recovered from

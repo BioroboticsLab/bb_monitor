@@ -59,10 +59,42 @@ for h in "${HOSTS[@]}"; do
 done
 echo
 
-echo "=== 5. Recent avahi/network events (did the resolver restart?) ==="
-journalctl -u avahi-daemon --since '-3h' --no-pager 2>/dev/null | tail -15 \
-  || echo "  (no journal access)"
+echo "=== 5. How often does this host's own interface drop off? ==="
+# Every "no longer relevant for mDNS" is this machine losing an interface: while it
+# is gone, nothing resolves and no ICMP flows, so every camera looks dead at once.
+if journalctl -u avahi-daemon --since '-24h' --no-pager >/dev/null 2>&1; then
+  drops=$(journalctl -u avahi-daemon --since '-24h' --no-pager 2>/dev/null \
+          | grep -c 'no longer relevant for mDNS')
+  echo "  interface drops in the last 24h: $drops"
+  echo "  (a check runs every 10 min; two consecutive checks must both land in a"
+  echo "   dropout to raise an alert, so a handful of short drops should stay silent)"
+  echo
+  echo "  most recent drop/rejoin pairs:"
+  journalctl -u avahi-daemon --since '-24h' --no-pager 2>/dev/null \
+    | grep -E 'no longer relevant|New relevant interface' \
+    | tail -8 | sed 's/^/    /'
+else
+  echo "  (no journal access)"
+fi
 echo
-echo "If section 1 shows names that do not resolve, or section 2 shows exit=2,"
-echo "the cameras are fine and mDNS on this host is the problem."
-echo "If section 4 succeeds by IP while section 2 fails by name, same conclusion."
+
+echo "=== 6. WiFi power saving (a common cause of these drops) ==="
+for dev in $(ls /sys/class/net 2>/dev/null); do
+  [ -d "/sys/class/net/$dev/wireless" ] || continue
+  ps=$(iw dev "$dev" get power_save 2>/dev/null | awk '{print $NF}')
+  echo "  $dev power_save: ${ps:-unknown}   (disable with: sudo iw dev $dev set power_save off)"
+done
+echo
+
+echo "=== 7. Suggested /etc/hosts lines (bypass mDNS entirely) ==="
+echo "  Add these to /etc/hosts on this machine, and reserve the leases on the router."
+echo "  ping and ssh then stop depending on avahi being up:"
+for h in "${HOSTS[@]}"; do
+  ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1; exit}')
+  [ -n "$ip" ] && printf "    %-16s %s %s\n" "$ip" "$h" "${h%%.local}"
+done
+echo
+echo "Reading this:"
+echo "  * section 2 exit=2 / section 1 unresolved  -> mDNS on THIS host, cameras are fine"
+echo "  * section 4 OK by IP while section 2 fails -> same conclusion"
+echo "  * section 5 shows frequent drops           -> this host's WiFi is the culprit"
