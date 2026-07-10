@@ -118,6 +118,22 @@ for h in "${HOSTS[@]}"; do
   [ -n "$ip" ] && printf "    %-16s %s %s\n" "$ip" "$h" "${h%%.local}"
 done
 echo
+echo "=== 9. ssh to the cached IP (what bb_monitor now does) ==="
+echo "  bb_monitor caches each IP and ssh'es to it with -o HostKeyAlias=<hostname>,"
+echo "  so known_hosts must hold each Pi's key under its NAME. It will, if you have"
+echo "  ever ssh'ed to these by name. If any line below FAILs, set"
+echo "  systemcheck_cache_addresses = False in the systemcheck config."
+for h in "${HOSTS[@]}"; do
+  ip=$(getent hosts "$h" 2>/dev/null | awk '{print $1; exit}')
+  [ -n "$ip" ] || { printf "  %-22s (no IP; skipped)\n" "$h"; continue; }
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o HostKeyAlias="$h" "pi@$ip" true 2>/dev/null; then
+    printf "  %-22s %-16s OK\n" "$h" "$ip"
+  else
+    printf "  %-22s %-16s FAIL (no host key for '%s' in known_hosts?)\n" "$h" "$ip" "$h"
+  fi
+done
+echo
+
 echo "Reading this:"
 echo "  * section 2 exit=2 / section 1 unresolved  -> mDNS on THIS host, cameras are fine"
 echo "  * section 2 shows 'did not return'         -> the lookup STALLED (see section 6)"
