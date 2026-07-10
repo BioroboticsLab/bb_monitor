@@ -141,27 +141,34 @@ def check_remote_service(host, service, ssh_timeout=30, ssh_target=None):
     return False, f"{host}: {service} not active (state={state})"
 
 
+def _heartbeat_probe_cmd(path):
+    """Remote command for the heartbeat probe.
+
+    It must always exit 0 and always print a line. `_ssh_failed` reads "non-zero
+    exit + empty stdout" as a transport failure, and that is exactly what the
+    previous `stat -c %Y -- {path} && date +%s` produced for a missing file: stat
+    exits 1, the `&&` short-circuits so nothing is printed, and a missing heartbeat
+    got reported as `ssh exec failed (stat: cannot statx ...)`.
+
+    `p=` is unquoted so a leading ~ still expands, as it did when this was a bare
+    `stat -c %Y -- {path}`; every later use quotes it.
+    """
+    return (
+        f"p={path}; now=$(date +%s); "
+        'if [ -e "$p" ]; then m=$(stat -c %Y -- "$p"); echo "OK $m $now"; '
+        'else echo "MISSING $now"; fi'
+    )
+
+
 def check_remote_heartbeat(host, path, max_age_seconds, ssh_timeout=30, ssh_target=None):
     """Freshness of a heartbeat file on the remote host. Return (ok, msg, state).
 
     Both timestamps come from the remote shell, so a constant client/server clock
     offset cancels out (a clock *step* between the last write and this read does
     not — that surfaces as "stale" or "future").
-
-    The remote command always exits 0 and always prints a line, so a missing file
-    reaches us as the "missing" state rather than tripping _ssh_failed's
-    "non-zero exit + empty stdout" heuristic and getting mislabelled as a
-    transport error.
     """
     target = ssh_target if ssh_target is not None else host
-    # p= is unquoted so a leading ~ still expands, as it did when this was a bare
-    # `stat -c %Y -- {path}`; every later use quotes it.
-    remote_cmd = (
-        f"p={path}; now=$(date +%s); "
-        'if [ -e "$p" ]; then m=$(stat -c %Y -- "$p"); echo "OK $m $now"; '
-        'else echo "MISSING $now"; fi'
-    )
-    proc, err = _ssh_run(target, remote_cmd, ssh_timeout)
+    proc, err = _ssh_run(target, _heartbeat_probe_cmd(path), ssh_timeout)
     if proc is None:
         return False, f"{host}: {err}", "error"
     stdout = proc.stdout.decode(errors="replace").strip()
@@ -503,7 +510,7 @@ class _Remediator:
             del self._attempts[host]
             self._last_attempt.pop(host, None)
 
-    def run(self, confirmed, found_keys, is_hourly_tick):
+    def run(self, confirmed, is_hourly_tick):
         """Attempt fixes for confirmed findings. Returns extra lines for the alert."""
         if not self.enabled:
             return []
@@ -515,11 +522,6 @@ class _Remediator:
         for finding in confirmed:
             if finding.kind != "heartbeat" or not finding.remediable:
                 continue
-            # Someone ran `systemctl stop raspicam` — don't fight them. (The camera
-            # checks skip the heartbeat probe when the service is down, so this can
-            # only trigger if the service died between the two probes.)
-            if (finding.host, f"svc:{RASPICAM_SERVICE}") in found_keys:
-                continue
 
             attempts = self._attempts.get(finding.host, 0)
             if attempts >= self.max_attempts:
@@ -530,6 +532,21 @@ class _Remediator:
                 continue
             last = self._last_attempt.get(finding.host)
             if last is not None and now - last < self.cooldown_seconds:
+                continue
+
+            # A camera whose service is stopped never produces a heartbeat finding
+            # (the probe is skipped), so reaching here normally means the service is
+            # up. But the probe ran a few SSH round trips ago; re-check immediately
+            # before pulling the trigger, in case someone has stopped the service in
+            # between to work on the camera. Costs one SSH, only on the fix path.
+            active, _ = check_remote_service(
+                finding.host, RASPICAM_SERVICE,
+                ssh_timeout=self.ssh_timeout, ssh_target=finding.ssh_target,
+            )
+            if not active:
+                lines.append(
+                    f"- {finding.host}: {RASPICAM_SERVICE} is stopped; skipping auto-restart"
+                )
                 continue
 
             ok, detail = kill_remote_raspicam(
@@ -631,15 +648,15 @@ def main():
     while True:
         loop_start = datetime.now()
         found = run_checks()
-        confirmed, pending = confirm(pending, found)
-        found_keys = {f.key for f in found}
+        confirmed, found_keys = confirm(pending, found)
+        pending = found_keys        # this tick's findings gate the next tick's alerts
         remediator.forget_recovered(found_keys)
         # The first fast tick of every hour also emits the "all OK" sanity ping.
         is_hourly_tick = loop_start.minute < fast_minutes
 
         if confirmed:
             lines = [f"- {f.message}" for f in confirmed]
-            lines += remediator.run(confirmed, found_keys, is_hourly_tick)
+            lines += remediator.run(confirmed, is_hourly_tick)
             _notify("Issues found:\n" + "\n".join(lines))
             # Set unconditionally: the system did have issues even if the alert
             # couldn't be delivered, so the next clean tick should still recover.

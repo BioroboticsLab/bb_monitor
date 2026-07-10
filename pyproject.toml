@@ -12,6 +12,9 @@ dependencies = [
     # "bb_pipeline @ git+https://github.com/BioroboticsLab/bb_pipeline.git",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [tool.setuptools]
 py-modules = ["bb_monitor", "bb_monitor_systemcheck", "bb_monitor_multi"]
 packages = {find = {where = ["src"]}}

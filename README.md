@@ -63,11 +63,15 @@ Each config runs in its own thread; if a thread crashes it auto-restarts after 1
 
 The loop runs every `systemcheck_fast_interval_minutes` (default 10) aligned to the wall clock (`:00`, `:10`, `:20`, ...). On every tick:
 
-- If any issue is found, a Telegram message lists the issues — the **immediate alert**.
-- The first clean tick *after* an alert posts a one-time "All systems OK" **recovery** message, then the loop goes silent again — so you know when a problem has cleared without waiting for the hourly summary.
-- If everything is fine, the tick is silent — *except* the first fast-tick of each hour, which always posts an "All systems OK" summary so a silent failure of the systemcheck process itself eventually becomes visible.
+- An issue must be found on **two consecutive ticks** before it is reported. A short-lived network blip that has cleared by the next tick never reaches Telegram; a real fault is announced one tick (default 10 min) later than it is first seen. Once confirmed, it is re-reported on every tick until it clears.
+- The first *completely clean* tick after an alert posts a one-time "All systems OK" **recovery** message, then the loop goes silent again.
+- If everything is fine, the tick is silent — *except* the first fast-tick of each hour, which always posts a summary so a silent failure of the systemcheck process itself eventually becomes visible. If findings are present but not yet confirmed, that hourly summary lists them rather than claiming all is well.
 
-The "had issues last tick" state is in-memory, so a restart while an issue is outstanding can miss that single recovery message; the hourly summary still confirms all-clear within the hour.
+Findings are matched across ticks by a stable `(host, kind)` key, not by message text — the text carries detail that changes every tick (a stale heartbeat's age grows), and several different probes share the same wording.
+
+Recovery requires a tick with **zero** findings, not merely zero *confirmed* findings. A finding disappearing does not prove it was fixed: when a camera fails to ping, the rest of its checks are skipped, so a transient blip would otherwise hide a still-wedged camera and read as a recovery.
+
+Confirmation and remediation state is in-memory, so a restart while an issue is outstanding re-arms the two-tick counter and can miss that single recovery message; the hourly summary still confirms all-clear within the hour.
 
 ### Image on recovery
 
@@ -88,18 +92,49 @@ Each listed config is run once via `BB_MONITOR_ONCE=1 python bb_monitor.py <conf
 Four independent check lists in the config:
 
 - `systemcheck_cameras` — typed entries that bundle a per-camera set of checks:
-  - `feedercam`: ping → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active → `mini_scale_logger.service` active → mini-scale CSV last row fresh.
-  - `exitcam`: ping → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active.
+  - `feedercam`: ping → clock → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active → `mini_scale_logger.service` active → mini-scale CSV last row fresh.
+  - `exitcam`: ping → clock → `raspicam.service` active → raspicam heartbeat file fresh → `imgstorage.service` active.
   If ping fails, the rest of the host's checks are skipped to avoid a wall of cascading SSH timeouts.
-- `systemcheck_temploggers` — for each entry, ping → `temperaturelogger.service` active (override via `"service"` key) → CSV last row fresh.
+- `systemcheck_temploggers` — for each entry, ping → clock → `temperaturelogger.service` active (override via `"service"` key) → CSV last row fresh.
 - `systemcheck_ping_hosts` — plain ICMP pings.
 - `systemcheck_process_hosts` — SSHes to the host, runs the configured command, and counts occurrences of a substring in the output. Generic enough to cover `nvidia-smi`-based GPU process checks or plain `pgrep` checks.
 
-The "service active" checks use `systemctl is-active`. "Heartbeat fresh" stats a file on the remote host and compares its mtime to the remote `date +%s` (no client/server clock skew). "CSV last row fresh" parses the leading ISO timestamp on the last non-header row of the newest file matching a glob.
+The "service active" checks use `systemctl is-active`. "CSV last row fresh" parses the leading ISO timestamp on the last non-header row of the newest file matching a glob.
 
-For raspicam heartbeat freshness to work, the camera host must be running a build of [bb_raspicam](https://github.com/BioroboticsLab/bb_raspicam) that touches the heartbeat file (default `/tmp/raspicam_heartbeat`) every ~30 captured frames. Optionally configurable in the raspicam config via a `[Monitoring]` section.
+The heartbeat check reads the file's mtime and the remote `date +%s` in one shot, so a constant client/server clock offset cancels out. It distinguishes **stale** (raspicam is alive but not capturing — the wedge), **missing** (this Pi runs a raspicam build older than heartbeat support, so it will never write one), and **mtime in the future** (the remote clock stepped backwards). The camera host must be running a build of [bb_raspicam](https://github.com/BioroboticsLab/bb_raspicam) that touches the heartbeat file (default `/tmp/raspicam_heartbeat`); the path, the ~30-frame cadence, and the camera's own watchdog are configurable there via a `[Monitoring]` section.
 
-SSH keys must be configured for passwordless login from the machine running the script to every camera, templogger, and process host.
+### Clock check
+
+Every SSH-reachable host's clock is compared against this machine's, since all devices in an experiment share a time server. A host whose clock is off by more than `systemcheck_max_clock_skew_seconds` (default 60) is reported.
+
+The comparison is bounded by the SSH round trip: the local clock is read either side of the call, so a slow connection can only ever *shrink* the reported skew, never invent one. When **every** reachable device disagrees in the same direction, the monitor reports `Monitor host clock may be wrong` once instead of one alert per device.
+
+### Auto-remediation
+
+A raspicam can stop delivering frames while its process stays alive, so `systemctl is-active` keeps saying `active` and systemd never restarts it. The only symptom is a stale heartbeat.
+
+When a heartbeat finding is *confirmed* (present on two consecutive ticks), the system check SSHes in and SIGKILLs the raspicam process by name; systemd then restarts it. The kill line is added to the Telegram alert as an audit trail.
+
+```python
+systemcheck_remediation_enabled          = True
+systemcheck_remediation_cooldown_minutes = 60   # at most one kill per host per hour
+systemcheck_remediation_max_attempts     = 3    # then escalate instead of retrying
+systemcheck_remediation_hourly_only      = False  # restrict fixes to the top-of-hour tick
+```
+
+Guards: it never fires while `raspicam.service` is stopped (someone is working on the device), never on a "mtime in the future" finding (that is a clock problem, not a wedge), and after `max_attempts` it gives up and says the Pi probably needs a bb_raspicam redeploy rather than restarting it forever.
+
+`SIGKILL` rather than `SIGTERM` is deliberate: systemd treats SIGTERM as a *clean* exit, so a unit with `Restart=on-failure` — what `setup_autostart.sh` deployed for years — would not restart after a `pkill`. SIGKILL restarts under both policies, so remediation works before the `Restart=always` unit change has reached every Pi. `raspicam.py` installs no signal handler, so nothing graceful is lost.
+
+SSH keys must be configured for passwordless login from the machine running the script to every camera, templogger, and process host. No `sudo` is required: the kill targets a process owned by the same user we SSH in as.
+
+### Tests
+
+The decision logic (two-tick confirmation, clock-skew bounds, heartbeat parsing) lives in `src/systemcheck_core.py` and is pure, so it runs without a network or a Pi:
+
+```bash
+python -m pytest tests/
+```
 
 ### Running
 
