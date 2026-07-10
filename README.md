@@ -151,11 +151,28 @@ Run `bash diagnose_ping.sh [host ...]` **on the monitor host** to pin it down. R
 from a *cold* link (schedule it with `at`): an interactive ssh session keeps WiFi
 awake and hides exactly the stall you are hunting.
 
-A stalled mDNS lookup on WiFi usually means **power saving**. mDNS is multicast, and
-a client in power save only wakes for multicast at DTIM beacons, so a link that idles
-between checks starts every check cold. Fix it with
-`sudo iw dev <dev> set power_save off` (persist via NetworkManager
-`wifi.powersave = 2`); this does not touch routing.
+### Why `ping` gets `-n`
+
+This is the single most important line in the ping path. Without `-n`, iputils does a
+**blocking reverse PTR lookup on every reply**, to print a hostname nothing reads.
+`-W` does not bound it — ping(8): *"the option affects only timeout in absence of any
+responses"* — so nothing bounds it but our own subprocess deadline.
+
+On a fleet like this one the PTR asks for `192.168.178.x` in `in-addr.arpa`. nss-mdns
+answers reverse queries only for `169.254.0.0/16` and returns `UNAVAIL` otherwise,
+which slips past `[NOTFOUND=return]` in `nsswitch.conf` and falls through to unicast
+DNS — on a dual-homed host, the resolver of the *default route*, which typically drops
+RFC1918 PTRs. glibc then waits `timeout:5` × `attempts:2` (resolv.conf(5)) and `ping`
+never returns. Healthy cameras get reported unreachable.
+
+`-n` is portable (BSD ping has it) and is already the implicit default when the target
+is numeric — which is exactly why pinging a cached IP never showed the stall, and why
+the problem was so hard to see. `-4` is **not** portable: BSD ping exits 64.
+
+If lookups still stall with `-n`, suspect WiFi **power saving** (mDNS is multicast, and
+a client in power save only wakes for multicast at DTIM beacons):
+`sudo iw dev <dev> set power_save off`, persisted via NetworkManager
+`wifi.powersave = 2`. Neither change touches routing.
 
 ### Address cache
 

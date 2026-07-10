@@ -21,7 +21,23 @@ echo "ping:      $(command -v ping)  |  $(ping -V 2>&1 | head -1)"
 echo "unpriv ICMP group range: $(cat /proc/sys/net/ipv4/ping_group_range 2>/dev/null || echo '?')"
 echo
 
-echo "=== 1. Name resolution (.local => mDNS/avahi) ==="
+echo "=== 0. COLD measurement (must run before anything else resolves a name) ==="
+echo "  Every later section warms avahi's cache (mDNS host records live 120s, RFC 6762 s10)."
+echo "  The monitor runs every 600s and is therefore ALWAYS cold. Measure that here."
+cold="${HOSTS[0]}"
+t() { s=$(date +%s%N); "$@" >/dev/null 2>&1; rc=$?; e=$(date +%s%N); echo "$(( (e-s)/1000000 )) $rc"; }
+read -r ms rc <<<"$(t getent hosts "$cold")";            printf "  %-42s %7sms (exit %s)\n" "forward lookup: getent hosts $cold" "$ms" "$rc"
+read -r ms rc <<<"$(t ping -c 1 -W 2 -n "$cold")";       printf "  %-42s %7sms (exit %s)\n" "ping -n (no reverse lookup)" "$ms" "$rc"
+read -r ms rc <<<"$(t ping -c 1 -W 2 "$cold")";          printf "  %-42s %7sms (exit %s)\n" "ping plain (does a reverse lookup)" "$ms" "$rc"
+cold_ip=$(getent hosts "$cold" 2>/dev/null | awk '{print $1; exit}')
+if [ -n "$cold_ip" ]; then
+  read -r ms rc <<<"$(t getent hosts "$cold_ip")";       printf "  %-42s %7sms (exit %s)\n" "reverse lookup: getent hosts $cold_ip" "$ms" "$rc"
+fi
+echo "  -> If 'ping plain' >> 'ping -n', the reverse PTR lookup is the stall. That is"
+echo "     what bb_monitor now avoids with -n. -W does NOT bound it (ping(8))."
+echo
+
+echo "=== 1. Name resolution (.local => mDNS/avahi)   [WARMS THE CACHE] ==="
 systemctl is-active avahi-daemon 2>/dev/null | sed 's/^/  avahi-daemon: /'
 grep '^hosts:' /etc/nsswitch.conf | sed 's/^/  nsswitch  /'
 for h in "${HOSTS[@]}"; do
@@ -30,16 +46,21 @@ for h in "${HOSTS[@]}"; do
 done
 echo
 
-echo "=== 2. Exactly what check_ping() runs: ping -c 1 -W 2 <host> ==="
+echo "=== 2. Exactly what check_ping() runs -- WITH WALL TIME ==="
+echo "  The monitor kills ping after 7s. An 'exit=0' that took 8s is a FAILURE there."
+echo "  Compare 'plain' (reverse PTR lookup on the reply) against '-n' (no reverse)."
+printf "  %-22s %10s %10s  %s\n" "host" "plain" "-n" "verdict"
 for h in "${HOSTS[@]}"; do
-  err=$(ping -c 1 -W 2 "$h" 2>&1 >/dev/null); rc=$?
-  case $rc in
-    0) verdict="OK" ;;
-    1) verdict="NO REPLY (host silent / dropped packet)" ;;
-    2) verdict="RESOLVE/SETUP FAILURE -- not the camera's fault" ;;
-    *) verdict="exit $rc" ;;
-  esac
-  printf "  %-22s exit=%-2s %-42s %s\n" "$h" "$rc" "$verdict" "$err"
+  s=$(date +%s%N); ping -c 1 -W 2    "$h" >/dev/null 2>&1; rc1=$?; e=$(date +%s%N)
+  t_plain=$(( (e-s)/1000000 ))
+  s=$(date +%s%N); ping -c 1 -W 2 -n "$h" >/dev/null 2>&1; rc2=$?; e=$(date +%s%N)
+  t_n=$(( (e-s)/1000000 ))
+  if   [ "$t_plain" -ge 7000 ]; then verdict="plain EXCEEDS the 7s deadline"
+  elif [ "$t_plain" -gt $(( t_n + 500 )) ]; then verdict="reverse PTR costs $(( t_plain - t_n ))ms"
+  elif [ $rc1 -ne 0 ]; then verdict="exit $rc1"
+  else verdict="both fast"
+  fi
+  printf "  %-22s %8sms %8sms  %s\n" "$h" "$t_plain" "$t_n" "$verdict"
 done
 echo
 

@@ -76,22 +76,35 @@ def _ping_args(timeout_seconds):
 
 
 def _ping_once(target, ping, deadline):
-    """One `ping -c 1` at `target` (a hostname or an IP). Return a PingResult.
+    """One `ping -c 1 -n` at `target` (a hostname or an IP). Return a PingResult.
+
+    `-n` is load-bearing, not cosmetic. Without it iputils does a *blocking* reverse
+    PTR lookup on every reply, to print a name we never read. `-W` does not bound it
+    — "the option affects only timeout in absence of any responses" (ping(8)) — so it
+    is unbounded by anything except our own subprocess deadline. On this fleet that
+    lookup asks for `192.168.178.x` in-addr.arpa; nss-mdns answers reverse queries
+    only for 169.254.0.0/16 and returns UNAVAIL otherwise, which slips past
+    `[NOTFOUND=return]` in nsswitch and falls through to unicast DNS — the university
+    resolver on the default route, which drops RFC1918 PTRs. glibc then waits
+    `timeout:5` × `attempts:2` (resolv.conf(5)), and ping never returns.
+
+    That is the whole reason healthy cameras were reported unreachable. `-n` is also
+    portable: BSD ping has it, and it is already the implicit default when the target
+    is numeric — which is exactly why pinging a cached IP never showed the stall.
 
     Classifies whose fault a failure is. iputils gives us enough to tell them apart:
 
       exit 1, nothing on stderr  the host did not answer          -> host-side
       exit 2, "Name or service not known" / "Network is unreachable"
                                  this machine could not get there -> monitor-side
-      no exit at all             the lookup stalled (mDNS over a
-                                 sleeping WiFi link)              -> monitor-side
+      no exit at all             a name lookup stalled            -> monitor-side
 
     Name resolution runs here, so a lookup that stalls or fails says nothing about
     the camera.
     """
     try:
         proc = subprocess.run(
-            ["ping", "-c", "1"] + _ping_args(ping.timeout_seconds) + [target],
+            ["ping", "-c", "1", "-n"] + _ping_args(ping.timeout_seconds) + [target],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=deadline,

@@ -18,23 +18,17 @@ MONITOR_HOST = "__monitor__"
 class PingSettings(NamedTuple):
     """How hard to try before calling a host unreachable.
 
-    Retries are *spaced*, not back-to-back, so that the attempts outlast a hiccup on
-    the monitor host's own link rather than all landing inside it. A misbehaving
-    mDNS lookup shows up either way: it can stall for seconds (WiFi power save delays
-    the multicast exchange) or fail instantly once the interface has gone away.
-    retry_span_seconds() assumes the instant-failure case because it is the one where
-    the timeouts contribute nothing, making it a lower bound on coverage.
+    Retries are *spaced*, not back-to-back, so that the attempts outlast a brief
+    hiccup on the monitor host's own link (its WiFi drops and reassociates a few
+    times a day) rather than all landing inside one.
     """
     timeout_seconds: float = 2
     attempts: int = 3
     retry_delay_seconds: float = 5
 
     def retry_span_seconds(self):
-        """Lower bound on the wall clock the retries cover.
-
-        When every attempt fails instantly, only the delays separate them. When
-        attempts instead stall to their deadline, the real span is longer.
-        """
+        """Lower bound on the wall clock the retries cover: the delays alone, since
+        an attempt that fails immediately contributes none of its timeout."""
         return max(0, self.attempts - 1) * self.retry_delay_seconds
 
     def worst_case_seconds(self):
@@ -149,9 +143,10 @@ def ping_targets(host, cached_address, attempts):
     return [cached_address] * max(1, attempts - 1) + [host]
 
 
-# `ping -W` bounds only the wait for an ICMP reply; name resolution happens before
-# that and is unbounded by it. Give each attempt this much extra wall clock so a
-# slow mDNS lookup is not mistaken for an unreachable host.
+# `ping -W` bounds only the wait for an ICMP reply (ping(8): "the option affects only
+# timeout in absence of any responses"). Name resolution is outside it entirely. With
+# `-n` the only unbounded work left is the *forward* lookup, so this grace covers a
+# cold mDNS query; the *reverse* PTR that used to blow past it is no longer performed.
 RESOLVE_GRACE_SECONDS = 3
 
 
@@ -268,12 +263,20 @@ def collapse_unreachable(findings, hosts_pinged):
         )]
 
     if hosts_pinged >= COLLAPSE_THRESHOLD and len(unreachable) == hosts_pinged:
+        # Every device is silent but our own resolver is fine, so the shared thing
+        # between them is at fault: the access point, the router, or this machine's
+        # link to it. Do NOT say "this host's network" — the last time every camera
+        # went quiet it was the router that had died, and pointing at the monitor
+        # would have sent someone to the wrong box. Name the hosts, so it is obvious
+        # whether the whole fleet or one subnet is gone.
         detail = _reason_of(unreachable[0])
         survivors = [f for f in findings if f.kind != "ping"]
+        hosts = ", ".join(sorted(f.host for f in unreachable))
         return survivors + [Finding(
             MONITOR_HOST, "network",
-            f"Monitor host cannot reach any of its {hosts_pinged} devices "
-            f"— check its own network" + (f": {detail}" if detail else ""),
+            f"None of the {hosts_pinged} devices answer — check the access point / "
+            f"router, and this host's link to it"
+            + (f" ({detail})" if detail else "") + f": {hosts}",
             monitor_side=True,
         )]
 

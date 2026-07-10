@@ -342,6 +342,36 @@ def test_ping_does_not_sleep_when_the_first_attempt_succeeds(monkeypatch):
     assert sleeps == []
 
 
+def test_ping_disables_reverse_dns():
+    """THE bug that reported eight healthy cameras as unreachable. Without -n, iputils
+    does a blocking reverse PTR lookup on every reply. `-W` does not bound it
+    (ping(8): "affects only timeout in absence of any responses"), nss-mdns returns
+    UNAVAIL for a 192.168.178.x PTR so it slips past [NOTFOUND=return] to unicast DNS,
+    and the university resolver drops RFC1918 PTRs — glibc then burns timeout:5 x
+    attempts:2 and ping never returns.
+
+    -4 is deliberately NOT passed: BSD ping has no such flag and exits 64.
+    """
+    seen = []
+    import subprocess as sp
+    real_run = sp.run
+
+    def spy(argv, **kw):
+        seen.append(argv)
+        return sp.CompletedProcess(argv, 0, b"PING h (10.0.0.1) 56 bytes", b"")
+
+    sc.subprocess.run = spy
+    try:
+        sc.check_ping("h", FAST, sc.HostAddresses())
+    finally:
+        sc.subprocess.run = real_run
+
+    argv = seen[0]
+    assert "-n" in argv, "reverse DNS must be disabled"
+    assert "-4" not in argv, "-4 is not portable; BSD ping exits 64"
+    assert argv[0] == "ping" and argv[-1] == "h"
+
+
 def test_a_stalled_ping_is_classified_as_the_monitors_fault(monkeypatch):
     """The production symptom: `ping did not return within 7s`. Not exit 2 — ping
     never returned at all, because the mDNS lookup stalled over a WiFi link in power
@@ -746,8 +776,8 @@ def test_blips_on_different_cameras_do_not_confirm_each_other(monkeypatch, fleet
 
 
 def test_a_fleet_wide_outage_produces_one_message_not_one_per_camera(monkeypatch, fleet):
-    """The reported symptom: every camera 'Cannot reach' at once, when in fact the
-    monitor host's WiFi had dropped. Blame the one machine they have in common."""
+    """Every camera silent at once: one message, pointing at the shared network — the
+    router, which is what actually died last time — and still naming the hosts."""
     def all_down(_):
         for p in fleet.values():
             p.reachable = False
@@ -755,8 +785,9 @@ def test_a_fleet_wide_outage_produces_one_message_not_one_per_camera(monkeypatch
     sent = run_ticks(monkeypatch, list(fleet.values()), [all_down, all_down])
     assert len(sent) == 1, sent
     message = sent[0][1]
-    assert "Monitor host cannot reach any of its 2 devices" in message
-    assert "exitcama.local" not in message and "exitcamb.local" not in message
+    assert "None of the 2 devices answer" in message
+    assert "access point / router" in message
+    assert "exitcama.local" in message and "exitcamb.local" in message
 
 
 def test_a_fleet_wide_outage_still_needs_two_ticks(monkeypatch, fleet):

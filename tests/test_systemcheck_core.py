@@ -334,13 +334,18 @@ def stalled(host, reason="ping did not return within 7s (name resolution stalled
                    monitor_side=True, reason=reason)
 
 
-def test_a_whole_fleet_unreachable_blames_the_monitor_host():
-    """Eight cameras do not drop off a network together."""
+def test_a_whole_fleet_silent_points_at_the_access_point_not_the_monitor():
+    """Every device silent while our own resolver is fine means the shared thing is
+    down. The last time this happened it was the router. An alert that says "check
+    this host's network" would send a tired scientist to the wrong box."""
     hosts = [f"cam{i}.local" for i in range(8)]
     findings = collapse_unreachable([unreachable(h) for h in hosts], hosts_pinged=8)
     assert len(findings) == 1
     assert findings[0].key == (MONITOR_HOST, "network")
-    assert "cannot reach any of its 8 devices" in findings[0].message
+    assert "None of the 8 devices answer" in findings[0].message
+    assert "access point / router" in findings[0].message
+    # and it must still say WHICH hosts, so a partial outage is distinguishable
+    assert "cam0.local" in findings[0].message and "cam7.local" in findings[0].message
 
 
 def test_resolver_stalls_collapse_even_when_another_host_answers():
